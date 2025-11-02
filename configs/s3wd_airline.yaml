@@ -1,10 +1,10 @@
 # === 数据集与标签（Kaggle Airline: departure delay, minutes）===
 # 请先将 airline.arff 或 airline.csv 放在 ./data/airline/airline.arff（或自行调整路径）
 # 该数据来自 Kaggle「Airline on-time performance」，包含连续列 dep_delay（起飞延误分钟）
-DATA_PATH: "../data/airline/airline.arff"
+DATA_PATH: "../data/airlines_train_regression_1000000.arff"
 
 # 这是“连续标签二值化”场景：按美国交通部常用标准，延误 > 15 分钟视为正类
-CONT_LABEL: "dep_delay"
+CONT_LABEL: "DepDelay"
 CONT_THRESH: 15
 CONT_OP: ">"
 
@@ -24,17 +24,20 @@ KWB_K: 6
 S3_c1: 0.37
 S3_c2: 0.63
 S3_xi_min: 0.10
-S3_theta_pos: 2.0
-S3_theta_neg: 1.0
+S3_theta_pos: 0.9
+S3_theta_neg: 0.1
 S3_penalty_large: 1000000.0
 S3_gamma_last: true
 S3_gap: 0.02
+S3_sigma: 3.0                 # 新增：后悔厌恶系数
+S3_regret_mode: utility       # 新增：utility 或 rate
 
 # === PSO 超参 ===
-PSO_particles: 20
-PSO_iters: 60
-PSO_w_max: 0.9
-PSO_w_min: 0.4
-PSO_c1: 2.8
-PSO_c2: 1.3
-PSO_seed: 42
+# PSO算法的参数配置
+PSO_particles: 20    # 粒子群中粒子的数量
+PSO_iters: 20       # 粒子群算法的最大迭代次数
+PSO_w_max: 0.9       # 惯性权重的最大值
+PSO_w_min: 0.4       # 惯性权重的最小值
+PSO_c1: 2.8          # 个体学习因子（认知参数）
+PSO_c2: 1.3          # 社会学习因子（社会参数）
+PSO_seed: 42         # 随机数生成器的种子值，用于保证实验可重复性

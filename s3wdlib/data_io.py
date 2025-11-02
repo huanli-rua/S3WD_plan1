@@ -103,16 +103,6 @@ def load_table_auto(path: str,
             y = (y == positive_label).astype(int)
 
     # 字符特征编码；缺失/无穷清理
-<<<<<<< HEAD
-    for c in X.columns:
-        if X[c].dtype == object:
-            X[c] = X[c].astype("category").cat.codes
-    X = X.replace([np.inf, -np.inf], np.nan).dropna(axis=0)
-    y = y.loc[X.index]
-
-    print(f"【数据加载完毕】样本数={len(X)}，特征数={X.shape[1]}，正类比例={float(y.mean()):.4f}")
-    return X.reset_index(drop=True), y.reset_index(drop=True)
-=======
     categorical_features: list[str] = []
     for c in X.columns:
         if X[c].dtype == object:
@@ -127,7 +117,6 @@ def load_table_auto(path: str,
 
     print(f"【数据加载完毕】样本数={len(X)}，特征数={X.shape[1]}，正类比例={float(y.mean()):.4f}")
     return X, y
->>>>>>> e6237f82eef4821a7d90f039e6e24b30c7bd79d2
 
 def minmax_scale_fit_transform(X_tr: pd.DataFrame, X_te: pd.DataFrame):
     """对训练集拟合 MinMaxScaler，并同步变换测试集。"""

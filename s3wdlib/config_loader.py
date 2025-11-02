@@ -1,12 +1,14 @@
-
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 import os, yaml
 
+# 支持分组与扁平配置；本项目统一推荐扁平键名：
+#   S3_sigma: 3.0
+#   S3_regret_mode: utility
 GROUPS = {"DATA","LEVEL","KWB","S3WD","PSO"}
 
 def _normalize_flat_to_grouped(raw: dict) -> dict:
-    # flat -> grouped mapping (minimal set)
+    """将扁平键名（例如 S3_sigma）映射为内部分组结构，兼容旧配置。"""
     D = {}
 
     # DATA
@@ -14,20 +16,20 @@ def _normalize_flat_to_grouped(raw: dict) -> dict:
     if dp:
         ddir, dfile = os.path.split(dp)
     else:
-        ddir, dfile = raw.get("DATA_DIR"), raw.get("DATA_FILE")
-    data = {
-        "data_dir": ddir or ".",
+        ddir = raw.get("DATA_DIR")
+        dfile = raw.get("DATA_FILE")
+    D["DATA"] = {
+        "data_dir": ddir,
         "data_file": dfile,
-        "continuous_label": raw.get("CONT_LABEL"),
-        "threshold": raw.get("CONT_THRESH"),
-        "threshold_op": raw.get("CONT_OP"),
-        "label_col": raw.get("LABEL_COL"),
-        "positive_label": raw.get("POSITIVE_LABEL"),
         "test_size": raw.get("TEST_SIZE"),
         "val_size": raw.get("VAL_SIZE"),
-        "random_state": raw.get("SEED"),
+        "random_state": raw.get("RANDOM_STATE"),
+        "label_col": raw.get("LABEL_COL"),
+        "positive_label": raw.get("POSITIVE_LABEL"),
+        "continuous_label": raw.get("CONTINUOUS_LABEL"),
+        "threshold": raw.get("THRESHOLD"),
+        "threshold_op": raw.get("THRESHOLD_OP"),
     }
-    D["DATA"] = data
 
     # LEVEL
     D["LEVEL"] = {
@@ -42,7 +44,7 @@ def _normalize_flat_to_grouped(raw: dict) -> dict:
         "eps": raw.get("KWB_eps", 1e-6),
     }
 
-    # S3WD
+    # S3WD —— 关键：读取扁平键 S3_sigma / S3_regret_mode
     pen = raw.get("S3_penalty_large", raw.get("S3_pentalty_large"))
     D["S3WD"] = {
         "c1": raw.get("S3_c1"),
@@ -50,6 +52,8 @@ def _normalize_flat_to_grouped(raw: dict) -> dict:
         "xi_min": raw.get("S3_xi_min"),
         "theta_pos": raw.get("S3_theta_pos"),
         "theta_neg": raw.get("S3_theta_neg"),
+        "sigma": raw.get("S3_sigma"),                         # ← 统一命名
+        "regret_mode": raw.get("S3_regret_mode","utility"),   # ← 统一命名
         "penalty_large": pen,
         "gamma_last": raw.get("S3_gamma_last", True),
         "gap": raw.get("S3_gap", 0.02),
@@ -67,22 +71,16 @@ def _normalize_flat_to_grouped(raw: dict) -> dict:
     }
     return D
 
-def _require(group: dict, gname: str, keys):
-    for k in keys:
-        if k not in group:
-            raise KeyError(f"{gname} 缺少字段: {k}")
-        if group[k] is None:
-            raise KeyError(f"{gname}.{k} 不能为空")
+def _require(G: dict, name: str, keys: list[str]):
+    missing = [k for k in keys if G.get(k) is None]
+    if missing:
+        raise KeyError(f"{name} 缺少必需键: {missing}")
 
-def load_yaml_cfg(path: str) -> dict:
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"配置文件不存在: {path}")
-    with open(path, "r", encoding="utf-8") as f:
+def load_config(yaml_path: str) -> dict:
+    with open(yaml_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
-    if not isinstance(raw, dict) or not raw:
-        raise ValueError(f"YAML 为空或结构不是字典: {path}")
 
-    # grouped or flat -> grouped
+    # 若直接提供了分组则直接使用，否则把扁平键归一化为分组
     if GROUPS & set(raw.keys()):
         cfg = raw
     else:
@@ -92,9 +90,8 @@ def load_yaml_cfg(path: str) -> dict:
     if missing:
         raise KeyError(f"YAML 缺少分组: {missing}，必须包含 {sorted(GROUPS)}")
 
-    # strict required keys
+    # 严格项校验
     _require(cfg["DATA"], "DATA", ["data_dir","data_file","test_size","val_size","random_state"])
-    # Either continuous or label_col
     has_cont = all(cfg["DATA"].get(x) is not None for x in ["continuous_label","threshold","threshold_op"])
     has_label = all(cfg["DATA"].get(x) is not None for x in ["label_col","positive_label"])
     if not (has_cont or has_label):
@@ -102,33 +99,34 @@ def load_yaml_cfg(path: str) -> dict:
 
     _require(cfg["LEVEL"], "LEVEL", ["level_pcts","ranker"])
     _require(cfg["KWB"],   "KWB",   ["k"])
-    _require(cfg["S3WD"],  "S3WD",  ["c1","c2","xi_min","theta_pos","theta_neg","penalty_large","gamma_last"])
+    _require(cfg["S3WD"],  "S3WD",  ["c1","c2","xi_min","theta_pos","theta_neg","sigma","penalty_large","gamma_last"])
     _require(cfg["PSO"],   "PSO",   ["particles","iters","w_max","w_min","c1","c2","seed"])
 
     return cfg
 
 def extract_vars(cfg: dict) -> dict:
-    # 为已有代码提供扁平访问快捷键（不引入默认）
+    """导出扁平变量名（统一风格），供其余模块直接使用。"""
     V = {}
     D = cfg["DATA"]
     V["DATA_PATH"] = os.path.join(D["data_dir"], D["data_file"])
-    if D.get("continuous_label") is not None:
-        V["CONT_LABEL"] = D["continuous_label"]
-        V["CONT_THRESH"] = D["threshold"]
-        V["CONT_OP"] = D["threshold_op"]
-    if D.get("label_col") is not None:
-        V["LABEL_COL"] = D["label_col"]
-        V["POSITIVE_LABEL"] = D["positive_label"]
-    V["TEST_SIZE"] = D["test_size"]
-    V["VAL_SIZE"] = D["val_size"]
-    V["SEED"] = D["random_state"]
+    V["TEST_SIZE"] = D["test_size"]; V["VAL_SIZE"] = D["val_size"]; V["RANDOM_STATE"] = D["random_state"]
+    V["LABEL_COL"] = D["label_col"]; V["POSITIVE_LABEL"] = D["positive_label"]
+    V["CONTINUOUS_LABEL"] = D["continuous_label"]; V["THRESHOLD"] = D["threshold"]; V["THRESHOLD_OP"] = D["threshold_op"]
 
-    L = cfg["LEVEL"]; V["LEVEL_PCTS"] = L["level_pcts"]; V["RANKER"] = L["ranker"]
-    K = cfg["KWB"];   V["KWB_K"] = K["k"]
+    L = cfg["LEVEL"]
+    V["LEVEL_PCTS"] = L["level_pcts"]; V["RANKER"] = L["ranker"]
+
+    K = cfg["KWB"]
+    V["KWB_K"] = K["k"]; V["KWB_metric"] = K["metric"]; V["KWB_eps"] = K["eps"]
+
     S = cfg["S3WD"]
     V["S3_c1"]=S["c1"]; V["S3_c2"]=S["c2"]; V["S3_xi_min"]=S["xi_min"]
     V["S3_theta_pos"]=S["theta_pos"]; V["S3_theta_neg"]=S["theta_neg"]
+    # —— 统一命名输出 —— #
+    V["S3_sigma"]=S["sigma"]
+    V["S3_regret_mode"]=S.get("regret_mode","utility")
     V["S3_penalty_large"]=S["penalty_large"]; V["S3_gamma_last"]=S["gamma_last"]; V["S3_gap"]=S.get("gap",0.02)
+
     P = cfg["PSO"]
     V["PSO_particles"]=P["particles"]; V["PSO_iters"]=P["iters"]
     V["PSO_w_max"]=P["w_max"]; V["PSO_w_min"]=P["w_min"]

@@ -25,8 +25,8 @@ KWB_K: 6   # 论文常用 k=6
 S3_c1: 0.37
 S3_c2: 0.63
 S3_xi_min: 0.10
-S3_theta_pos: 2.0
-S3_theta_neg: 1.0
+S3_theta_pos: 0.9
+S3_theta_neg: 0.1
 S3_penalty_large: 1000000.0
 S3_gamma_last: true        # 末层固定 0.5（不使用“fix”命名）
 S3_gap: 0.02
