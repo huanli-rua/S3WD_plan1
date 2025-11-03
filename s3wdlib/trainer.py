@@ -3,9 +3,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import logging
+
 import numpy as np
 
 from .objective import s3wd_objective, S3WDParams
+from .dyn_threshold import adapt_thresholds_windowed_pso
+
+
+_logger = logging.getLogger(__name__)
+if not _logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    _logger.addHandler(_handler)
+_logger.setLevel(logging.INFO)
 
 try:  # pragma: no cover - optional dependency
     import cupy as cp  # type: ignore
@@ -25,6 +36,12 @@ class PSOParams:
     c2: float = 1.3
     seed: int = 42
     use_gpu: bool = True
+    window_mode: bool = False
+    window_size: int | None = None
+    ema_alpha: float = 0.6
+    median_window: int = 3
+    keep_gap: float | None = None
+    fallback_rule: bool = True
 
 def _encode_init(nL, rng):
     alphas = rng.uniform(0.55, 0.95, size=nL)
@@ -43,6 +60,38 @@ def _apply_chain(alphas, betas):
     return a, b
 
 def pso_learn_thresholds(prob_levels, y, params: S3WDParams, pso: PSOParams):
+    if getattr(pso, "window_mode", False):
+        history = getattr(pso, "_history", None)
+        window_size = getattr(pso, "window_size", None)
+        if window_size is None and prob_levels:
+            window_size = int(np.asarray(prob_levels[0]).size)
+        result = adapt_thresholds_windowed_pso(
+            prob_levels,
+            y,
+            params,
+            particles=getattr(pso, "particles", 12),
+            iters=getattr(pso, "iters", 30),
+            seed=pso.seed,
+            keep_gap=getattr(pso, "keep_gap", None),
+            history=history,
+            window_size=window_size,
+            ema_alpha=getattr(pso, "ema_alpha", 0.6),
+            median_window=getattr(pso, "median_window", 3),
+            fallback_rule=getattr(pso, "fallback_rule", True),
+        )
+        setattr(pso, "_history", result.history)
+        _logger.info(
+            "窗口化 PSO 最优阈值 α=%s, β=%s, γ=%.2f, 边界占比=%.3f, IG=%.4f, Regret=%.4f, 可行=%s",
+            np.round(result.alphas, 4).tolist(),
+            np.round(result.betas, 4).tolist(),
+            result.gamma,
+            result.details.get("bnd_ratio", 0.0),
+            result.details.get("ig", 0.0),
+            result.details.get("regret", 0.0),
+            "是" if result.feasible else "否",
+        )
+        return (result.alphas, result.betas, result.gamma), float(result.fitness), result.details
+
     use_gpu = bool(getattr(pso, "use_gpu", False))
     if use_gpu and not _CUPY_AVAILABLE:
         print("⚠️ 当前环境缺少 CuPy，PSO 将在 CPU 上运行。")
