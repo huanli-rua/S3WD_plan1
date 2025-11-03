@@ -5,7 +5,7 @@ import os, yaml
 # 支持分组与扁平配置；本项目统一推荐扁平键名：
 #   S3_sigma: 3.0
 #   S3_regret_mode: utility
-GROUPS = {"DATA","LEVEL","KWB","S3WD","PSO"}
+GROUPS = {"DATA","LEVEL","KWB","GWB","S3WD","PSO"}
 
 def _normalize_flat_to_grouped(raw: dict) -> dict:
     """将扁平键名（例如 S3_sigma）映射为内部分组结构，兼容旧配置。"""
@@ -42,6 +42,18 @@ def _normalize_flat_to_grouped(raw: dict) -> dict:
         "k": raw.get("KWB_K"),
         "metric": raw.get("KWB_metric","euclidean"),
         "eps": raw.get("KWB_eps", 1e-6),
+    }
+
+    # GWB
+    D["GWB"] = {
+        "k": raw.get("GWB_K"),
+        "metric": raw.get("GWB_metric", "euclidean"),
+        "eps": raw.get("GWB_eps", 1e-6),
+        "mode": raw.get("GWB_mode", raw.get("GWB_kernel", "epanechnikov")),
+        "bandwidth": raw.get("GWB_bandwidth"),
+        "bandwidth_scale": raw.get("GWB_bandwidth_scale", 1.0),
+        "use_faiss": raw.get("GWB_use_faiss", False),
+        "faiss_gpu": raw.get("GWB_faiss_gpu", False),
     }
 
     # S3WD —— 关键：读取扁平键 S3_sigma / S3_regret_mode
@@ -99,6 +111,7 @@ def load_config(yaml_path: str) -> dict:
 
     _require(cfg["LEVEL"], "LEVEL", ["level_pcts","ranker"])
     _require(cfg["KWB"],   "KWB",   ["k"])
+    _require(cfg["GWB"],   "GWB",   ["k"])
     _require(cfg["S3WD"],  "S3WD",  ["c1","c2","xi_min","theta_pos","theta_neg","sigma","penalty_large","gamma_last"])
     _require(cfg["PSO"],   "PSO",   ["particles","iters","w_max","w_min","c1","c2","seed"])
 
@@ -119,6 +132,16 @@ def extract_vars(cfg: dict) -> dict:
     K = cfg["KWB"]
     V["KWB_K"] = K["k"]; V["KWB_metric"] = K["metric"]; V["KWB_eps"] = K["eps"]
 
+    G = cfg["GWB"]
+    V["GWB_K"] = G["k"]
+    V["GWB_metric"] = G["metric"]
+    V["GWB_eps"] = G["eps"]
+    V["GWB_mode"] = G["mode"]
+    V["GWB_bandwidth"] = G["bandwidth"]
+    V["GWB_bandwidth_scale"] = G["bandwidth_scale"]
+    V["GWB_use_faiss"] = G["use_faiss"]
+    V["GWB_faiss_gpu"] = G["faiss_gpu"]
+
     S = cfg["S3WD"]
     V["S3_c1"]=S["c1"]; V["S3_c2"]=S["c2"]; V["S3_xi_min"]=S["xi_min"]
     V["S3_theta_pos"]=S["theta_pos"]; V["S3_theta_neg"]=S["theta_neg"]
@@ -135,6 +158,10 @@ def extract_vars(cfg: dict) -> dict:
 
 def show_cfg(cfg: dict) -> None:
     print("【配置快照】")
-    for grp in ["DATA","LEVEL","KWB","S3WD","PSO"]:
+    for grp in ["DATA","LEVEL","KWB","GWB","S3WD","PSO"]:
         if grp in cfg:
             print(f"- {grp}: {cfg[grp]}")
+
+
+# 向后兼容老接口命名
+load_yaml_cfg = load_config

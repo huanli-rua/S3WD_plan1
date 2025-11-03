@@ -15,6 +15,12 @@ RANKER: "mi"                  # mi=互信息；simple=方差
 
 # === KWB 参数 ===
 KWB_K: 5
+# === GWB 参数 ===
+GWB_K: 5
+GWB_mode: "epanechnikov"
+GWB_bandwidth: 0.8
+GWB_use_faiss: true
+GWB_faiss_gpu: false
 
 # === S3WD（严格按论文）===
 S3_c1: 0.37                   # 信息增益权重占位（保持原文比例）

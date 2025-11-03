@@ -19,6 +19,12 @@ RANKER: "mi"
 
 # === KWB 参数 ===
 KWB_K: 6
+# === GWB 参数 ===
+GWB_K: 6
+GWB_mode: "epanechnikov"     # mode: gaussian | epanechnikov | triangular | exponential
+GWB_bandwidth: 0.8            # 带宽 h：特征已缩放到[0,1]时可先尝试 0.5~1.0
+GWB_use_faiss: true           # 是否启用 FAISS（若环境不支持会自动降级并提示）
+GWB_faiss_gpu: false          # 是否将 FAISS 推到 GPU（自动检测可用 GPU）
 
 # === S3WD（严格按论文）===
 S3_c1: 0.37
