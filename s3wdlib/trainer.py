@@ -24,7 +24,7 @@ class PSOParams:
     c1: float = 2.8
     c2: float = 1.3
     seed: int = 42
-    use_gpu: bool = False
+    use_gpu: bool = True
 
 def _encode_init(nL, rng):
     alphas = rng.uniform(0.55, 0.95, size=nL)

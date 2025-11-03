@@ -26,8 +26,8 @@ class KWBProbEstimator:
     metric: str = "euclidean"
     eps: float = 1e-6
     min_prob: float = 0.01
-    use_faiss: bool = False
-    faiss_gpu: bool = False
+    use_faiss: bool = True
+    faiss_gpu: bool = True
 
     def __post_init__(self) -> None:
         if self.k <= 0:

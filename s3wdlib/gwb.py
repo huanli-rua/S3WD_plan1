@@ -71,8 +71,8 @@ class GWBProbEstimator:
     mode: str = "epanechnikov"
     bandwidth: float | None = None
     bandwidth_scale: float = 1.0
-    use_faiss: bool = False
-    faiss_gpu: bool = False
+    use_faiss: bool = True
+    faiss_gpu: bool = True
 
     def __post_init__(self) -> None:
         if self.k <= 0:

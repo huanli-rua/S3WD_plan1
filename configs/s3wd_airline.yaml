@@ -20,13 +20,13 @@ RANKER: "mi"
 # === KWB 参数 ===
 KWB_K: 6
 KWB_use_faiss: true            # 是否启用 FAISS 加速后验（环境不支持时自动降级）
-KWB_faiss_gpu: true           # 是否使用 GPU 版 FAISS（自动检测可用 GPU）
+KWB_faiss_gpu: true            # 是否使用 GPU 版 FAISS（自动检测可用 GPU）
 # === GWB 参数 ===
 GWB_K: 6
 GWB_mode: "epanechnikov"     # mode: gaussian | epanechnikov | triangular | exponential
 GWB_bandwidth: 0.8            # 带宽 h：特征已缩放到[0,1]时可先尝试 0.5~1.0
 GWB_use_faiss: true           # 是否启用 FAISS（若环境不支持会自动降级并提示）
-GWB_faiss_gpu: true          # 是否将 FAISS 推到 GPU（自动检测可用 GPU）
+GWB_faiss_gpu: true           # 是否将 FAISS 推到 GPU（自动检测可用 GPU）
 
 # === S3WD（严格按论文）===
 S3_c1: 0.37
@@ -49,4 +49,4 @@ PSO_w_min: 0.4       # 惯性权重的最小值
 PSO_c1: 2.8          # 个体学习因子（认知参数）
 PSO_c2: 1.3          # 社会学习因子（社会参数）
 PSO_seed: 42         # 随机数生成器的种子值，用于保证实验可重复性
-PSO_use_gpu: true   # 是否在 GPU 上运行 PSO（依赖 CuPy，自动检测环境）
+PSO_use_gpu: true    # 是否在 GPU 上运行 PSO（依赖 CuPy，自动检测环境）
