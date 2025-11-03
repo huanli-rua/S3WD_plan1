@@ -15,6 +15,8 @@ RANKER: "mi"                  # mi=互信息；simple=方差
 
 # === KWB 参数 ===
 KWB_K: 5
+KWB_use_faiss: true
+KWB_faiss_gpu: false
 # === GWB 参数 ===
 GWB_K: 5
 GWB_mode: "epanechnikov"
@@ -40,3 +42,4 @@ PSO_w_min: 0.4
 PSO_c1: 1.8
 PSO_c2: 1.8
 PSO_seed: 42
+PSO_use_gpu: false

@@ -42,6 +42,20 @@ def _normalize_flat_to_grouped(raw: dict) -> dict:
         "k": raw.get("KWB_K"),
         "metric": raw.get("KWB_metric","euclidean"),
         "eps": raw.get("KWB_eps", 1e-6),
+        "use_faiss": raw.get("KWB_use_faiss", False),
+        "faiss_gpu": raw.get("KWB_faiss_gpu", False),
+    }
+
+    # GWB
+    D["GWB"] = {
+        "k": raw.get("GWB_K"),
+        "metric": raw.get("GWB_metric", "euclidean"),
+        "eps": raw.get("GWB_eps", 1e-6),
+        "mode": raw.get("GWB_mode", raw.get("GWB_kernel", "epanechnikov")),
+        "bandwidth": raw.get("GWB_bandwidth"),
+        "bandwidth_scale": raw.get("GWB_bandwidth_scale", 1.0),
+        "use_faiss": raw.get("GWB_use_faiss", False),
+        "faiss_gpu": raw.get("GWB_faiss_gpu", False),
     }
 
     # GWB
@@ -80,6 +94,7 @@ def _normalize_flat_to_grouped(raw: dict) -> dict:
         "c1": raw.get("PSO_c1"),
         "c2": raw.get("PSO_c2"),
         "seed": raw.get("PSO_seed"),
+        "use_gpu": raw.get("PSO_use_gpu", False),
     }
     return D
 
@@ -143,6 +158,18 @@ def extract_vars(cfg: dict) -> dict:
 
     K = cfg["KWB"]
     V["KWB_K"] = K["k"]; V["KWB_metric"] = K["metric"]; V["KWB_eps"] = K["eps"]
+    V["KWB_use_faiss"] = K.get("use_faiss", False)
+    V["KWB_faiss_gpu"] = K.get("faiss_gpu", False)
+
+    G = cfg["GWB"]
+    V["GWB_K"] = G["k"]
+    V["GWB_metric"] = G["metric"]
+    V["GWB_eps"] = G["eps"]
+    V["GWB_mode"] = G["mode"]
+    V["GWB_bandwidth"] = G["bandwidth"]
+    V["GWB_bandwidth_scale"] = G["bandwidth_scale"]
+    V["GWB_use_faiss"] = G["use_faiss"]
+    V["GWB_faiss_gpu"] = G["faiss_gpu"]
 
     G = cfg["GWB"]
     V["GWB_K"] = G["k"]
@@ -166,6 +193,7 @@ def extract_vars(cfg: dict) -> dict:
     V["PSO_particles"]=P["particles"]; V["PSO_iters"]=P["iters"]
     V["PSO_w_max"]=P["w_max"]; V["PSO_w_min"]=P["w_min"]
     V["PSO_c1"]=P["c1"]; V["PSO_c2"]=P["c2"]; V["PSO_seed"]=P["seed"]
+    V["PSO_use_gpu"]=P.get("use_gpu", False)
     return V
 
 def show_cfg(cfg: dict) -> None:

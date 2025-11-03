@@ -18,6 +18,8 @@ RANKER: "mi"
 
 # === KWB 参数 ===
 KWB_K: 6   # 与 Heart 保持一致，便于对比
+KWB_use_faiss: true
+KWB_faiss_gpu: false
 # === GWB 参数 ===
 GWB_K: 6   # 与 Heart 保持一致，便于对比
 GWB_mode: "epanechnikov"
@@ -43,3 +45,4 @@ PSO_w_min: 0.4
 PSO_c1: 2.8
 PSO_c2: 1.3
 PSO_seed: 42
+PSO_use_gpu: false
