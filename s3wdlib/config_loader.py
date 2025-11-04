@@ -101,6 +101,8 @@ def _normalize_flat_to_grouped(raw: dict) -> dict:
             "median_window": raw.get("DYN_median_window"),
             "keep_gap": raw.get("DYN_keep_gap"),
             "fallback_rule": raw.get("DYN_fallback_rule"),
+            "gamma_last": raw.get("DYN_gamma_last"),
+            "stall_rounds": raw.get("DYN_stall_rounds"),
         }
 
     # Drift detector
@@ -233,6 +235,8 @@ def extract_vars(cfg: dict) -> dict:
         V["DYN_median_window"] = Y.get("median_window")
         V["DYN_keep_gap"] = Y.get("keep_gap")
         V["DYN_fallback_rule"] = Y.get("fallback_rule")
+        V["DYN_gamma_last"] = Y.get("gamma_last")
+        V["DYN_stall_rounds"] = Y.get("stall_rounds")
 
     if "DRIFT" in cfg:
         R = cfg["DRIFT"]

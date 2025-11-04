@@ -30,6 +30,16 @@ pso_params, detector, updater = build_dynamic_components(
 )
 ```
 
+### DYN / DRIFT / INCR 字段对照
+
+| 分组 | 关键字段 | 对应接口 |
+| --- | --- | --- |
+| `DYN` | `strategy`, `step`, `window_size`, `target_bnd`, `ema_alpha`, `median_window`, `keep_gap`, `fallback_rule`,<br>`gamma_last`, `stall_rounds` | `s3wdlib.streaming.DynamicLoopConfig` / `PSOParams` / `adapt_thresholds_windowed_pso` |
+| `DRIFT` | `method`, `window_size`, `stat_size`, `significance`, `delta`, `cooldown`, `min_window_length` | `s3wdlib.drift.DriftDetector` |
+| `INCR` | `buffer_size`, `cache_strategy`, `rebuild_interval`, `min_rebuild_interval`, `drift_shrink`, `immediate_rebuild_methods`, `enable_faiss_append`, `random_state` | `s3wdlib.incremental.PosteriorUpdater` |
+
+示例 YAML (`configs/s3wd_airline_dynamic.yaml`) 已给出全部字段，可直接按需修改。
+
 ## 开启 / 关闭动态组件
 
 - **开启动态策略**：在 YAML 中保留 `DYN`、`DRIFT`、`INCR` 块即可，对应字段会被加载并注入运行组件。

@@ -22,6 +22,8 @@ class DynamicLoopConfig:
     median_window: int = 3
     keep_gap: Optional[float] = None
     fallback_rule: bool = True
+    gamma_last: Optional[float] = None
+    stall_rounds: int = 6
 
     def make_pso_params(self, base: Optional[PSOParams] = None) -> PSOParams:
         """Return a :class:`PSOParams` instance tailored for the configured strategy."""
@@ -35,6 +37,8 @@ class DynamicLoopConfig:
         params.fallback_rule = self.fallback_rule
         params.step = self.step
         params.target_bnd = self.target_bnd
+        params.gamma_last = self.gamma_last
+        params.stall_rounds = self.stall_rounds
         return params
 
     def is_windowed(self) -> bool:

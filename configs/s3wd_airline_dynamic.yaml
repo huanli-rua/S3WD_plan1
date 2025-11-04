@@ -22,6 +22,8 @@ KWB:
 
 GWB:
   k: 6
+  metric: "euclidean"
+  eps: 1.0e-6
   mode: "epanechnikov"
   bandwidth: 0.8
   bandwidth_scale: 1.0
@@ -59,6 +61,8 @@ DYN:
   median_window: 3
   keep_gap: 0.02
   fallback_rule: true
+  gamma_last: 0.5
+  stall_rounds: 8
 
 DRIFT:
   method: "kswin"

@@ -44,6 +44,8 @@ class PSOParams:
     fallback_rule: bool = True
     step: int = 512
     target_bnd: float = 0.18
+    gamma_last: float | None = None
+    stall_rounds: int = 6
 
 def _encode_init(nL, rng):
     alphas = rng.uniform(0.55, 0.95, size=nL)
@@ -79,6 +81,8 @@ def pso_learn_thresholds(prob_levels, y, params: S3WDParams, pso: PSOParams):
             window_size=window_size,
             ema_alpha=getattr(pso, "ema_alpha", 0.6),
             median_window=getattr(pso, "median_window", 3),
+            gamma_last=getattr(pso, "gamma_last", None),
+            stall_rounds=int(getattr(pso, "stall_rounds", 6)),
             fallback_rule=getattr(pso, "fallback_rule", True),
         )
         setattr(pso, "_history", result.history)
