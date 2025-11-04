@@ -1,11 +1,16 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 import os, yaml
+from typing import Optional, Tuple
+
+from .streaming import DynamicLoopConfig, DriftDetectorConfig, PosteriorUpdaterConfig
 
 # 支持分组与扁平配置；本项目统一推荐扁平键名：
 #   S3_sigma: 3.0
 #   S3_regret_mode: utility
-GROUPS = {"DATA","LEVEL","KWB","GWB","S3WD","PSO"}
+REQUIRED_GROUPS = {"DATA", "LEVEL", "KWB", "GWB", "S3WD", "PSO"}
+OPTIONAL_GROUPS = {"DYN", "DRIFT", "INCR"}
+GROUPS = REQUIRED_GROUPS | OPTIONAL_GROUPS
 
 def _normalize_flat_to_grouped(raw: dict) -> dict:
     """将扁平键名（例如 S3_sigma）映射为内部分组结构，兼容旧配置。"""
@@ -84,6 +89,46 @@ def _normalize_flat_to_grouped(raw: dict) -> dict:
         "seed": raw.get("PSO_seed"),
         "use_gpu": raw.get("PSO_use_gpu", True),
     }
+
+    # Dynamic loop
+    if any(k.startswith("DYN_") for k in raw):
+        D["DYN"] = {
+            "strategy": raw.get("DYN_strategy"),
+            "step": raw.get("DYN_step"),
+            "window_size": raw.get("DYN_window_size"),
+            "target_bnd": raw.get("DYN_target_bnd"),
+            "ema_alpha": raw.get("DYN_ema_alpha"),
+            "median_window": raw.get("DYN_median_window"),
+            "keep_gap": raw.get("DYN_keep_gap"),
+            "fallback_rule": raw.get("DYN_fallback_rule"),
+            "gamma_last": raw.get("DYN_gamma_last"),
+            "stall_rounds": raw.get("DYN_stall_rounds"),
+        }
+
+    # Drift detector
+    if any(k.startswith("DRIFT_") for k in raw):
+        D["DRIFT"] = {
+            "method": raw.get("DRIFT_method"),
+            "window_size": raw.get("DRIFT_window_size"),
+            "stat_size": raw.get("DRIFT_stat_size"),
+            "significance": raw.get("DRIFT_significance"),
+            "delta": raw.get("DRIFT_delta"),
+            "cooldown": raw.get("DRIFT_cooldown"),
+            "min_window_length": raw.get("DRIFT_min_window_length"),
+        }
+
+    # Incremental updater
+    if any(k.startswith("INCR_") for k in raw):
+        D["INCR"] = {
+            "buffer_size": raw.get("INCR_buffer_size"),
+            "cache_strategy": raw.get("INCR_cache_strategy"),
+            "rebuild_interval": raw.get("INCR_rebuild_interval"),
+            "min_rebuild_interval": raw.get("INCR_min_rebuild_interval"),
+            "drift_shrink": raw.get("INCR_drift_shrink"),
+            "immediate_rebuild_methods": raw.get("INCR_immediate_rebuild_methods"),
+            "enable_faiss_append": raw.get("INCR_enable_faiss_append"),
+            "random_state": raw.get("INCR_random_state"),
+        }
     return D
 
 def _require(G: dict, name: str, keys: list[str]):
@@ -105,9 +150,9 @@ def load_yaml_cfg(path: str) -> dict:
     else:
         cfg = _normalize_flat_to_grouped(raw)
 
-    missing = [g for g in GROUPS if g not in cfg]
+    missing = [g for g in REQUIRED_GROUPS if g not in cfg]
     if missing:
-        raise KeyError(f"YAML 缺少分组: {missing}，必须包含 {sorted(GROUPS)}")
+        raise KeyError(f"YAML 缺少分组: {missing}，必须包含 {sorted(REQUIRED_GROUPS)}")
 
     # 严格项校验
     _require(cfg["DATA"], "DATA", ["data_dir","data_file","test_size","val_size","random_state"])
@@ -122,6 +167,13 @@ def load_yaml_cfg(path: str) -> dict:
     _require(cfg["GWB"],   "GWB",   ["k"])
     _require(cfg["S3WD"],  "S3WD",  ["c1","c2","xi_min","theta_pos","theta_neg","sigma","penalty_large","gamma_last"])
     _require(cfg["PSO"],   "PSO",   ["particles","iters","w_max","w_min","c1","c2","seed"])
+
+    if "DYN" in cfg:
+        _require(cfg["DYN"], "DYN", ["strategy", "step", "target_bnd"])
+    if "DRIFT" in cfg:
+        _require(cfg["DRIFT"], "DRIFT", ["method", "window_size", "stat_size"])
+    if "INCR" in cfg:
+        _require(cfg["INCR"], "INCR", ["buffer_size", "cache_strategy", "rebuild_interval"])
 
     return cfg
 
@@ -172,11 +224,69 @@ def extract_vars(cfg: dict) -> dict:
     V["PSO_w_max"]=P["w_max"]; V["PSO_w_min"]=P["w_min"]
     V["PSO_c1"]=P["c1"]; V["PSO_c2"]=P["c2"]; V["PSO_seed"]=P["seed"]
     V["PSO_use_gpu"]=P.get("use_gpu", True)
+
+    if "DYN" in cfg:
+        Y = cfg["DYN"]
+        V["DYN_strategy"] = Y["strategy"]
+        V["DYN_step"] = Y["step"]
+        V["DYN_window_size"] = Y.get("window_size")
+        V["DYN_target_bnd"] = Y["target_bnd"]
+        V["DYN_ema_alpha"] = Y.get("ema_alpha")
+        V["DYN_median_window"] = Y.get("median_window")
+        V["DYN_keep_gap"] = Y.get("keep_gap")
+        V["DYN_fallback_rule"] = Y.get("fallback_rule")
+        V["DYN_gamma_last"] = Y.get("gamma_last")
+        V["DYN_stall_rounds"] = Y.get("stall_rounds")
+
+    if "DRIFT" in cfg:
+        R = cfg["DRIFT"]
+        V["DRIFT_method"] = R["method"]
+        V["DRIFT_window_size"] = R["window_size"]
+        V["DRIFT_stat_size"] = R["stat_size"]
+        V["DRIFT_significance"] = R.get("significance")
+        V["DRIFT_delta"] = R.get("delta")
+        V["DRIFT_cooldown"] = R.get("cooldown")
+        V["DRIFT_min_window_length"] = R.get("min_window_length")
+
+    if "INCR" in cfg:
+        I = cfg["INCR"]
+        V["INCR_buffer_size"] = I["buffer_size"]
+        V["INCR_cache_strategy"] = I["cache_strategy"]
+        V["INCR_rebuild_interval"] = I["rebuild_interval"]
+        V["INCR_min_rebuild_interval"] = I.get("min_rebuild_interval")
+        V["INCR_drift_shrink"] = I.get("drift_shrink")
+        V["INCR_immediate_rebuild_methods"] = I.get("immediate_rebuild_methods")
+        V["INCR_enable_faiss_append"] = I.get("enable_faiss_append")
+        V["INCR_random_state"] = I.get("random_state")
     return V
 
 def show_cfg(cfg: dict) -> None:
     print("【配置快照】")
-    for grp in ["DATA","LEVEL","KWB","GWB","S3WD","PSO"]:
+    for grp in ["DATA","LEVEL","KWB","GWB","S3WD","PSO","DYN","DRIFT","INCR"]:
         if grp in cfg:
             print(f"- {grp}: {cfg[grp]}")
+
+
+def extract_dynamic_configs(
+    cfg: dict,
+) -> Tuple[
+    Optional[DynamicLoopConfig],
+    Optional[DriftDetectorConfig],
+    Optional[PosteriorUpdaterConfig],
+]:
+    """提取 DYN/DRIFT/INCR 配置并实例化对应 dataclass。"""
+
+    def _compact(section: Optional[dict]) -> Optional[dict]:
+        if not section:
+            return None
+        return {k: v for k, v in section.items() if v is not None}
+
+    dyn = _compact(cfg.get("DYN"))
+    drift = _compact(cfg.get("DRIFT"))
+    incr = _compact(cfg.get("INCR"))
+
+    dyn_cfg = DynamicLoopConfig(**dyn) if dyn else None
+    drift_cfg = DriftDetectorConfig(**drift) if drift else None
+    incr_cfg = PosteriorUpdaterConfig(**incr) if incr else None
+    return dyn_cfg, drift_cfg, incr_cfg
 
