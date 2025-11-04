@@ -46,11 +46,15 @@ class PSOParams:
     target_bnd: float = 0.18
     gamma_last: float | None = None
     stall_rounds: int = 6
+    search_gamma: bool = True
 
-def _encode_init(nL, rng):
+def _encode_init(nL, rng, search_gamma: bool = False):
     alphas = rng.uniform(0.55, 0.95, size=nL)
-    betas  = rng.uniform(0.05, 0.45, size=nL)
-    return np.concatenate([alphas, betas])
+    betas = rng.uniform(0.05, 0.45, size=nL)
+    parts = [alphas, betas]
+    if search_gamma:
+        parts.append(rng.uniform(0.2, 0.8, size=1))
+    return np.concatenate(parts)
 
 def _apply_chain(alphas, betas):
     a = np.array(alphas, float)
@@ -84,6 +88,7 @@ def pso_learn_thresholds(prob_levels, y, params: S3WDParams, pso: PSOParams):
             gamma_last=getattr(pso, "gamma_last", None),
             stall_rounds=int(getattr(pso, "stall_rounds", 6)),
             fallback_rule=getattr(pso, "fallback_rule", True),
+            search_gamma=bool(getattr(pso, "search_gamma", True)),
         )
         setattr(pso, "_history", result.history)
         _logger.info(
@@ -107,15 +112,19 @@ def pso_learn_thresholds(prob_levels, y, params: S3WDParams, pso: PSOParams):
     rng = (cp.random.RandomState(pso.seed) if use_gpu else np.random.RandomState(pso.seed))  # type: ignore[operator]
 
     nL = len(prob_levels)
-    dim = 2 * nL  # γ 固定为 0.5
+    search_gamma = bool(getattr(pso, "search_gamma", True))
+    dim = 2 * nL + (1 if search_gamma else 0)
 
     if use_gpu:
         alpha_init = rng.uniform(0.55, 0.95, size=(pso.particles, nL))
         beta_init = rng.uniform(0.05, 0.45, size=(pso.particles, nL))
-        X = xp.concatenate([alpha_init, beta_init], axis=1)
+        parts = [alpha_init, beta_init]
+        if search_gamma:
+            parts.append(rng.uniform(0.2, 0.8, size=(pso.particles, 1)))
+        X = xp.concatenate(parts, axis=1)
         V = rng.uniform(-0.2, 0.2, size=(pso.particles, dim))
     else:
-        X = np.vstack([_encode_init(nL, rng) for _ in range(pso.particles)])
+        X = np.vstack([_encode_init(nL, rng, search_gamma=search_gamma) for _ in range(pso.particles)])
         V = rng.uniform(-0.2, 0.2, size=(pso.particles, dim))
     if use_gpu:
         V = xp.asarray(V)
@@ -131,7 +140,8 @@ def pso_learn_thresholds(prob_levels, y, params: S3WDParams, pso: PSOParams):
         a = vec_np[:nL]
         b = vec_np[nL:2 * nL]
         a, b = _apply_chain(a, b)
-        f, details = s3wd_objective(prob_levels, y, a, b, 0.5, params)
+        gamma_val = float(vec_np[-1]) if search_gamma else 0.5
+        f, details = s3wd_objective(prob_levels, y, a, b, gamma_val, params)
         return f, details, a, b
 
     pbest = X.copy()
@@ -168,5 +178,5 @@ def pso_learn_thresholds(prob_levels, y, params: S3WDParams, pso: PSOParams):
     a = gbest_np[:nL]
     b = gbest_np[nL:2 * nL]
     a, b = _apply_chain(a, b)
-    gamma = 0.5
+    gamma = float(gbest_np[-1]) if search_gamma else 0.5
     return (a, b, gamma), float(gbest_fit), (gbest_det or {})

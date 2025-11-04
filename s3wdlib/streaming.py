@@ -24,6 +24,15 @@ class DynamicLoopConfig:
     fallback_rule: bool = True
     gamma_last: Optional[float] = None
     stall_rounds: int = 6
+    search_gamma: bool = True
+    approx_bins: int = 256
+    ema_gamma: float = 0.6
+    step_max: float = 0.05
+    hysteresis: float = 0.01
+    replay_size: int = 20
+    rlite_interval: int = 10
+    rlite_grid_step: float = 0.02
+    rlite_grid_radius: int = 2
 
     def make_pso_params(self, base: Optional[PSOParams] = None) -> PSOParams:
         """Return a :class:`PSOParams` instance tailored for the configured strategy."""
@@ -39,12 +48,23 @@ class DynamicLoopConfig:
         params.target_bnd = self.target_bnd
         params.gamma_last = self.gamma_last
         params.stall_rounds = self.stall_rounds
+        params.search_gamma = self.search_gamma
         return params
 
     def is_windowed(self) -> bool:
         """Whether the dynamic loop should run the windowed PSO strategy."""
 
         return self.strategy.lower() == "windowed_pso"
+
+    def is_s_lite(self) -> bool:
+        """Whether to run the lightweight S-lite update."""
+
+        return self.strategy.lower() in {"s_lite", "slite", "s-lite"}
+
+    def rlite_enabled(self) -> bool:
+        """Whether the offline R-lite calibration should run alongside S-lite."""
+
+        return self.rlite_interval > 0
 
 
 @dataclass
