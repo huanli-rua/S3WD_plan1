@@ -4,8 +4,8 @@ from __future__ import annotations
 import logging
 import math
 from collections import deque
-from dataclasses import dataclass, field
-from typing import Deque, Dict, Iterable, List, Optional
+from dataclasses import dataclass, field, fields
+from typing import Deque, Dict, Iterable, List, Mapping, Optional, Any
 
 _logger = logging.getLogger(__name__)
 if not _logger.handlers:
@@ -13,6 +13,69 @@ if not _logger.handlers:
     _handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
     _logger.addHandler(_handler)
 _logger.setLevel(logging.INFO)
+
+
+@dataclass
+class DriftConfig:
+    """配置包装器（对应 YAML 中的 DRIFT 分组）。"""
+
+    enabled: bool = False
+    strategy: str = "kswin"
+    window_size: int = 200
+    stat_size: int = 60
+    significance: float = 0.05
+    delta: float = 0.002
+    cooldown: int = 0
+    min_window_length: int = 5
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "DriftConfig":
+        kwargs: Dict[str, Any] = {}
+        for f in fields(cls):
+            if f.name in data:
+                kwargs[f.name] = data[f.name]
+        return cls(**kwargs)
+
+    @staticmethod
+    def ensure(cfg: Optional[Mapping[str, Any] | "DriftConfig"]) -> "DriftConfig":
+        if cfg is None:
+            return DriftConfig()
+        if isinstance(cfg, DriftConfig):
+            return cfg
+        if isinstance(cfg, Mapping):
+            return DriftConfig.from_mapping(cfg)
+        raise TypeError(f"无法识别的漂移检测配置类型: {type(cfg)!r}")
+
+    def resolved_strategy(self) -> str:
+        name = (self.strategy or "kswin").lower()
+        if name in {"kswin", "adwin"}:
+            return name
+        raise ValueError(f"Unsupported drift strategy: {self.strategy}")
+
+    def build_detector(self) -> Optional["DriftDetector"]:
+        if not self.enabled:
+            return None
+        return DriftDetector(
+            method=self.resolved_strategy(),
+            window_size=self.window_size,
+            stat_size=self.stat_size,
+            significance=self.significance,
+            delta=self.delta,
+            cooldown=self.cooldown,
+            min_window_length=self.min_window_length,
+        )
+
+    def apply(self, detector: "DriftDetector") -> "DriftDetector":
+        detector.configure(
+            method=self.resolved_strategy(),
+            window_size=self.window_size,
+            stat_size=self.stat_size,
+            significance=self.significance,
+            delta=self.delta,
+            cooldown=self.cooldown,
+            min_window_length=self.min_window_length,
+        )
+        return detector
 
 
 @dataclass

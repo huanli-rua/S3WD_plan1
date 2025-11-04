@@ -2,8 +2,19 @@
 """动态阈值自适应模块。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple
+from dataclasses import dataclass, fields, replace
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import logging
 import math
@@ -11,6 +22,9 @@ import math
 import numpy as np
 
 from .objective import S3WDParams, s3wd_objective
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from .trainer import PSOParams
 
 
 _logger = logging.getLogger(__name__)
@@ -34,6 +48,114 @@ class ThresholdAdaptResult:
     history: MutableMapping[str, List[np.ndarray]]
     method: str
 
+
+@dataclass
+class DynamicAdaptConfig:
+    """动态阈值策略配置（YAML 的 DYN 分组）。"""
+
+    enabled: bool = True
+    strategy: str = "windowed_pso"
+    step: int = 1
+    target_bnd: float = 0.12
+    ema_alpha: float = 0.6
+    median_window: int = 3
+    keep_gap: Optional[float] = None
+    window_size: Optional[int] = None
+    stall_rounds: int = 6
+    fallback_rule: bool = True
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "DynamicAdaptConfig":
+        kwargs: Dict[str, Any] = {}
+        for f in fields(cls):
+            if f.name in data:
+                kwargs[f.name] = data[f.name]
+        return cls(**kwargs)
+
+    @staticmethod
+    def ensure(cfg: Optional[Mapping[str, Any] | "DynamicAdaptConfig"]) -> "DynamicAdaptConfig":
+        if cfg is None:
+            return DynamicAdaptConfig()
+        if isinstance(cfg, DynamicAdaptConfig):
+            return cfg
+        if isinstance(cfg, Mapping):
+            return DynamicAdaptConfig.from_mapping(cfg)
+        raise TypeError(f"无法识别的动态阈值配置类型: {type(cfg)!r}")
+
+    def resolved_strategy(self) -> str:
+        name = (self.strategy or "windowed_pso").lower()
+        if name in {"windowed_pso", "windowed-pso", "pso"}:
+            return "windowed_pso"
+        if name in {"rule_based", "rule-based", "rule"}:
+            return "rule_based"
+        raise ValueError(f"Unsupported dynamic strategy: {self.strategy}")
+
+    def should_update(self, iteration: int) -> bool:
+        if not self.enabled:
+            return False
+        step = int(self.step) if self.step is not None else 0
+        if step <= 0:
+            return True
+        iteration = max(1, int(iteration))
+        return iteration % step == 0
+
+    def apply_to_pso(self, params: "PSOParams") -> "PSOParams":
+        params.window_mode = True
+        if self.window_size is not None:
+            params.window_size = int(self.window_size)
+        params.ema_alpha = float(self.ema_alpha)
+        params.median_window = int(self.median_window)
+        params.keep_gap = self.keep_gap
+        params.fallback_rule = bool(self.fallback_rule)
+        if hasattr(params, "stall_rounds"):
+            params.stall_rounds = int(self.stall_rounds)
+        return params
+
+
+@dataclass
+class IncrementalUpdateConfig:
+    """增量学习配置（YAML 的 INCR 分组）。"""
+
+    enabled: bool = False
+    strategy: str = "rolling"
+    step: int = 1
+    buffer_size: int = 2048
+    max_samples: Optional[int] = None
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "IncrementalUpdateConfig":
+        kwargs: Dict[str, Any] = {}
+        for f in fields(cls):
+            if f.name in data:
+                kwargs[f.name] = data[f.name]
+        return cls(**kwargs)
+
+    @staticmethod
+    def ensure(cfg: Optional[Mapping[str, Any] | "IncrementalUpdateConfig"]) -> "IncrementalUpdateConfig":
+        if cfg is None:
+            return IncrementalUpdateConfig()
+        if isinstance(cfg, IncrementalUpdateConfig):
+            return cfg
+        if isinstance(cfg, Mapping):
+            return IncrementalUpdateConfig.from_mapping(cfg)
+        raise TypeError(f"无法识别的增量配置类型: {type(cfg)!r}")
+
+    def resolved_strategy(self) -> str:
+        return (self.strategy or "rolling").lower()
+
+    def should_update(self, iteration: int) -> bool:
+        if not self.enabled:
+            return True
+        step = int(self.step) if self.step is not None else 0
+        if step <= 0:
+            return True
+        iteration = max(1, int(iteration))
+        return iteration % step == 0
+
+    def effective_window(self, fallback: Optional[int] = None) -> Optional[int]:
+        if not self.enabled:
+            return fallback
+        return int(self.buffer_size) if self.buffer_size is not None else fallback
 
 def _enforce_gap(alpha: np.ndarray, beta: np.ndarray, gap: float) -> Tuple[np.ndarray, np.ndarray]:
     alpha = np.asarray(alpha, dtype=float).copy()
@@ -109,6 +231,7 @@ def adapt_thresholds_rule_based(
     ema_alpha: float = 0.6,
     median_window: int = 3,
     gamma_last: float | None = None,
+    target_bnd: Optional[float] = None,
 ) -> ThresholdAdaptResult:
     """基于经验规则的阈值自适应。"""
 
@@ -142,12 +265,19 @@ def adapt_thresholds_rule_based(
 
     bnd_ratio = _calc_boundary_ratio(prob_levels_np, smooth_alpha, smooth_beta)
     feasible = bool(np.all(smooth_alpha >= smooth_beta + keep_gap))
+    penalty_target = 0.0
+    if target_bnd is not None and bnd_ratio < float(target_bnd):
+        shortfall = float(target_bnd) - float(bnd_ratio)
+        penalty_target = float(params.penalty_large) * shortfall
+        fitness = float(fitness + penalty_target)
     detail = dict(detail)
     detail.update({
         "bnd_ratio": float(bnd_ratio),
         "fitness": float(fitness),
         "feasible": feasible,
         "penalty_infeasible": 0.0,
+        "penalty_target": float(penalty_target),
+        "bnd_target": float(target_bnd) if target_bnd is not None else None,
         "method": "rule_based",
     })
 
@@ -189,6 +319,7 @@ def adapt_thresholds_windowed_pso(
     gamma_last: float | None = None,
     stall_rounds: int = 6,
     fallback_rule: bool = True,
+    target_bnd: Optional[float] = None,
 ) -> ThresholdAdaptResult:
     """窗口化 PSO 阈值自适应。"""
 
@@ -228,13 +359,21 @@ def adapt_thresholds_windowed_pso(
         adj_alpha, adj_beta = _enforce_gap(raw_alpha, raw_beta, keep_gap)
         gamma_eval = 0.5 if gamma_last is None else float(gamma_last)
         fitness, detail = s3wd_objective(prob_levels_np, y_arr, adj_alpha, adj_beta, gamma_eval, params)
-        penalty = 0.0 if feasible_raw else float(params.penalty_large)
-        fitness_pen = float(fitness + penalty)
+        penalty_infeasible = 0.0 if feasible_raw else float(params.penalty_large)
+        bnd_ratio = _calc_boundary_ratio(prob_levels_np, adj_alpha, adj_beta)
+        penalty_target = 0.0
+        if target_bnd is not None and bnd_ratio < float(target_bnd):
+            shortfall = float(target_bnd) - float(bnd_ratio)
+            penalty_target = float(params.penalty_large) * shortfall
+        fitness_pen = float(fitness + penalty_infeasible + penalty_target)
         det_map = dict(detail)
         det_map.update({
-            "penalty_infeasible": penalty,
+            "penalty_infeasible": penalty_infeasible,
+            "penalty_target": float(penalty_target),
             "fitness": fitness_pen,
             "feasible": bool(np.all(adj_alpha >= adj_beta + keep_gap)),
+            "bnd_ratio": float(bnd_ratio),
+            "bnd_target": float(target_bnd) if target_bnd is not None else None,
         })
         return fitness_pen, det_map, adj_alpha, adj_beta, feasible_raw
 
@@ -293,6 +432,11 @@ def adapt_thresholds_windowed_pso(
     final_fit, final_detail = s3wd_objective(prob_levels_np, y_arr, smooth_alpha, smooth_beta, gamma, params)
     bnd_ratio = _calc_boundary_ratio(prob_levels_np, smooth_alpha, smooth_beta)
     feasible = bool(np.all(smooth_alpha >= smooth_beta + keep_gap))
+    penalty_target = 0.0
+    if target_bnd is not None and bnd_ratio < float(target_bnd):
+        shortfall = float(target_bnd) - float(bnd_ratio)
+        penalty_target = float(params.penalty_large) * shortfall
+        final_fit = float(final_fit + penalty_target)
 
     detail = dict(final_detail)
     detail.update({
@@ -300,6 +444,8 @@ def adapt_thresholds_windowed_pso(
         "fitness": float(final_fit),
         "feasible": feasible,
         "penalty_infeasible": gbest_info.get("penalty_infeasible", 0.0),
+        "penalty_target": float(penalty_target),
+        "bnd_target": float(target_bnd) if target_bnd is not None else None,
         "method": "windowed_pso",
     })
 
@@ -314,6 +460,7 @@ def adapt_thresholds_windowed_pso(
             ema_alpha=ema_alpha,
             median_window=median_window,
             gamma_last=gamma_last,
+            target_bnd=target_bnd,
         )
 
     _logger.info(
@@ -336,3 +483,82 @@ def adapt_thresholds_windowed_pso(
         history=history,
         method="windowed_pso",
     )
+
+
+def run_dynamic_thresholds(
+    prob_levels: Sequence[np.ndarray],
+    y: Iterable[int],
+    params: S3WDParams,
+    *,
+    dynamic: Optional[Mapping[str, Any] | DynamicAdaptConfig] = None,
+    incremental: Optional[Mapping[str, Any] | IncrementalUpdateConfig] = None,
+    iteration: int = 1,
+    pso_params: Optional["PSOParams"] = None,
+    history: Optional[MutableMapping[str, List[np.ndarray]]] = None,
+    gamma_last: float | None = None,
+) -> Optional[ThresholdAdaptResult]:
+    """根据 DYN/INCR 配置执行一次动态阈值调整。
+
+    若当前迭代无需刷新阈值，则返回 ``None``。
+    """
+
+    dyn_cfg = DynamicAdaptConfig.ensure(dynamic)
+    incr_cfg = IncrementalUpdateConfig.ensure(incremental)
+
+    if not dyn_cfg.should_update(iteration):
+        return None
+    if not incr_cfg.should_update(iteration):
+        return None
+
+    strategy = dyn_cfg.resolved_strategy()
+    keep_gap = dyn_cfg.keep_gap
+    if strategy == "rule_based":
+        result = adapt_thresholds_rule_based(
+            prob_levels,
+            y,
+            params,
+            keep_gap=keep_gap,
+            history=history,
+            ema_alpha=dyn_cfg.ema_alpha,
+            median_window=dyn_cfg.median_window,
+            gamma_last=gamma_last,
+            target_bnd=dyn_cfg.target_bnd,
+        )
+    else:
+        if pso_params is None:
+            from .trainer import PSOParams  # 延迟导入避免循环依赖
+
+            pso_params = PSOParams()
+        dyn_cfg.apply_to_pso(pso_params)
+        window_sz = pso_params.window_size
+        if window_sz is None:
+            window_sz = incr_cfg.effective_window(window_sz)
+        result = adapt_thresholds_windowed_pso(
+            prob_levels,
+            y,
+            params,
+            particles=getattr(pso_params, "particles", 12),
+            iters=getattr(pso_params, "iters", 30),
+            seed=getattr(pso_params, "seed", None),
+            keep_gap=pso_params.keep_gap if pso_params.keep_gap is not None else keep_gap,
+            history=history,
+            window_size=window_sz,
+            ema_alpha=pso_params.ema_alpha,
+            median_window=pso_params.median_window,
+            gamma_last=gamma_last,
+            stall_rounds=getattr(pso_params, "stall_rounds", dyn_cfg.stall_rounds),
+            fallback_rule=pso_params.fallback_rule,
+            target_bnd=dyn_cfg.target_bnd,
+        )
+
+    detail = dict(result.details)
+    detail.setdefault("dynamic_step", dyn_cfg.step)
+    detail.setdefault("dynamic_strategy", dyn_cfg.resolved_strategy())
+    detail.setdefault("dynamic_target_bnd", dyn_cfg.target_bnd)
+    if incr_cfg.enabled:
+        detail.setdefault("incr_strategy", incr_cfg.resolved_strategy())
+        detail.setdefault("incr_step", incr_cfg.step)
+        detail.setdefault("incr_buffer_size", incr_cfg.buffer_size)
+        detail.setdefault("incr_max_samples", incr_cfg.max_samples)
+
+    return replace(result, details=detail)
