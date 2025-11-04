@@ -1,0 +1,80 @@
+# 动态流式实验配置：Airline 数据集
+DATA:
+  data_dir: "../data"
+  data_file: "airlines_train_regression_1000000.arff"
+  continuous_label: "DepDelay"
+  threshold: 15
+  threshold_op: ">"
+  test_size: 0.30
+  val_size: 0.30
+  random_state: 42
+
+LEVEL:
+  level_pcts: [0.6, 0.8, 1.0]
+  ranker: "mi"
+
+KWB:
+  k: 6
+  metric: "euclidean"
+  eps: 1.0e-6
+  use_faiss: true
+  faiss_gpu: true
+
+GWB:
+  k: 6
+  mode: "epanechnikov"
+  bandwidth: 0.8
+  bandwidth_scale: 1.0
+  use_faiss: true
+  faiss_gpu: true
+
+S3WD:
+  c1: 0.37
+  c2: 0.63
+  xi_min: 0.10
+  theta_pos: 0.9
+  theta_neg: 0.1
+  sigma: 3.0
+  regret_mode: "utility"
+  penalty_large: 1000000.0
+  gamma_last: true
+  gap: 0.02
+
+PSO:
+  particles: 20
+  iters: 20
+  w_max: 0.9
+  w_min: 0.4
+  c1: 2.8
+  c2: 1.3
+  seed: 42
+  use_gpu: true
+
+DYN:
+  strategy: "windowed_pso"
+  step: 256
+  window_size: 512
+  target_bnd: 0.18
+  ema_alpha: 0.6
+  median_window: 3
+  keep_gap: 0.02
+  fallback_rule: true
+
+DRIFT:
+  method: "kswin"
+  window_size: 512
+  stat_size: 128
+  significance: 0.05
+  delta: 0.002
+  cooldown: 128
+  min_window_length: 32
+
+INCR:
+  buffer_size: 8192
+  cache_strategy: "sliding"
+  rebuild_interval: 512
+  min_rebuild_interval: 96
+  drift_shrink: 0.5
+  immediate_rebuild_methods: ["adwin"]
+  enable_faiss_append: true
+  random_state: 42

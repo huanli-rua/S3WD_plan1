@@ -42,6 +42,8 @@ class PSOParams:
     median_window: int = 3
     keep_gap: float | None = None
     fallback_rule: bool = True
+    step: int = 512
+    target_bnd: float = 0.18
 
 def _encode_init(nL, rng):
     alphas = rng.uniform(0.55, 0.95, size=nL)
