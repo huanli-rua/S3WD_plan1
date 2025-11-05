@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+import math
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
@@ -73,6 +74,8 @@ class GWBProbEstimator:
     bandwidth_scale: float = 1.0
     use_faiss: bool = True
     faiss_gpu: bool = True
+    categorical_features: Sequence[str] | None = None
+    category_penalty: float = 0.5
 
     def __post_init__(self) -> None:
         if self.k <= 0:
@@ -92,8 +95,71 @@ class GWBProbEstimator:
         self._faiss_res = None
         self._use_faiss_runtime = False
         self._k_effective = None
+        self.category_penalty = float(np.clip(self.category_penalty, 0.0, 1.0))
+        self._cat_tr: np.ndarray | None = None
+        self._cat_cols: list[str] = []
 
-    def fit(self, X, y):
+    @staticmethod
+    def _normalize_categories(values: np.ndarray) -> np.ndarray:
+        normalized = np.empty(values.shape, dtype=object)
+        for idx, val in np.ndenumerate(values):
+            if val is None:
+                normalized[idx] = "__MISSING__"
+                continue
+            try:
+                if isinstance(val, (float, np.floating)) and math.isnan(float(val)):
+                    normalized[idx] = "__MISSING__"
+                    continue
+            except TypeError:
+                pass
+            normalized[idx] = str(val)
+        return normalized
+
+    def _prepare_categorical(
+        self,
+        values,
+        *,
+        expected: Optional[Sequence[str]] = None,
+    ) -> tuple[np.ndarray | None, list[str] | None]:
+        if values is None:
+            return None, None
+        if hasattr(values, "to_numpy") and callable(getattr(values, "to_numpy")):
+            columns = list(getattr(values, "columns", []))
+            arr = values.to_numpy()
+        else:
+            columns = None
+            arr = np.asarray(values, dtype=object)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        arr = np.asarray(arr, dtype=object)
+        arr = self._normalize_categories(arr)
+        if expected is not None:
+            expected = list(expected)
+            aligned_parts: list[np.ndarray] = []
+            if columns is not None:
+                name_to_idx = {name: idx for idx, name in enumerate(columns)}
+                for name in expected:
+                    idx = name_to_idx.get(name)
+                    if idx is None:
+                        aligned_parts.append(np.full((arr.shape[0], 1), "__MISSING__", dtype=object))
+                    else:
+                        aligned_parts.append(arr[:, idx : idx + 1])
+                if aligned_parts:
+                    arr = np.concatenate(aligned_parts, axis=1)
+                else:
+                    arr = np.full((arr.shape[0], len(expected)), "__MISSING__", dtype=object)
+            else:
+                if arr.shape[1] < len(expected):
+                    pad = np.full((arr.shape[0], len(expected) - arr.shape[1]), "__MISSING__", dtype=object)
+                    arr = np.concatenate([arr, pad], axis=1)
+                elif arr.shape[1] > len(expected):
+                    arr = arr[:, : len(expected)]
+            columns = expected
+        elif columns is None:
+            columns = [f"cat_{i}" for i in range(arr.shape[1])]
+        return arr, list(columns) if columns is not None else None
+
+    def fit(self, X, y, categorical_values=None):
         X = np.asarray(X, float)
         y = np.asarray(y, int)
         n_samples = X.shape[0]
@@ -134,6 +200,15 @@ class GWBProbEstimator:
             self.nn.fit(X)
 
         self.y_tr = y
+        cat_arr, cat_cols = self._prepare_categorical(
+            categorical_values, expected=self.categorical_features
+        )
+        if cat_arr is not None and cat_arr.size > 0:
+            self._cat_tr = cat_arr
+            self._cat_cols = cat_cols or list(self.categorical_features or [])
+        else:
+            self._cat_tr = None
+            self._cat_cols = []
         return self
 
     def _compute_weights(self, distances: np.ndarray) -> np.ndarray:
@@ -151,7 +226,27 @@ class GWBProbEstimator:
             weights[zero_mask[:, 0]] = 1.0
         return weights
 
-    def predict_proba(self, X):
+    def _apply_categorical_kernel(
+        self,
+        weights: np.ndarray,
+        idx: np.ndarray,
+        categorical_values,
+    ) -> np.ndarray:
+        if self._cat_tr is None or not self._cat_cols:
+            return weights
+        cat_query, _ = self._prepare_categorical(categorical_values, expected=self._cat_cols)
+        if cat_query is None or cat_query.shape[1] != self._cat_tr.shape[1]:
+            return weights
+        if self.category_penalty >= 1.0:
+            return weights
+        penalty = float(max(self.category_penalty, 1e-3))
+        nbr_cats = self._cat_tr[idx]
+        mismatches = cat_query[:, None, :] != nbr_cats
+        mismatch_counts = mismatches.sum(axis=2)
+        reweight = np.power(penalty, mismatch_counts)
+        return weights * reweight
+
+    def predict_proba(self, X, categorical_values=None):
         if self.y_tr is None or self._k_effective is None:
             raise RuntimeError("Estimator must be fitted before calling predict_proba().")
 
@@ -167,6 +262,8 @@ class GWBProbEstimator:
                 raise RuntimeError("FAISS 初始化失败且未建立 sklearn 近邻模型。")
             distances, idx = self.nn.kneighbors(X, n_neighbors=self._k_effective, return_distance=True)
         weights = self._compute_weights(distances)
+        if categorical_values is not None or self._cat_tr is not None:
+            weights = self._apply_categorical_kernel(weights, idx, categorical_values)
 
         nbr_y = self.y_tr[idx]
         weights_pos = weights * (nbr_y == 1)

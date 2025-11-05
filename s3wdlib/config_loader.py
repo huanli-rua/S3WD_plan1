@@ -34,6 +34,7 @@ def _normalize_flat_to_grouped(raw: dict) -> dict:
         "test_size": raw.get("TEST_SIZE"),
         "val_size": raw.get("VAL_SIZE"),
         "random_state": raw.get("SEED"),
+        "start_year": raw.get("DATA_start_year", raw.get("START_YEAR")),
     }
 
     # LEVEL
@@ -61,6 +62,8 @@ def _normalize_flat_to_grouped(raw: dict) -> dict:
         "bandwidth_scale": raw.get("GWB_bandwidth_scale", 1.0),
         "use_faiss": raw.get("GWB_use_faiss", True),
         "faiss_gpu": raw.get("GWB_faiss_gpu", True),
+        "categorical_features": raw.get("GWB_categorical_features"),
+        "category_penalty": raw.get("GWB_category_penalty"),
     }
 
     # S3WD —— 关键：读取扁平键 S3_sigma / S3_regret_mode
@@ -98,11 +101,19 @@ def _normalize_flat_to_grouped(raw: dict) -> dict:
             "window_size": raw.get("DYN_window_size"),
             "target_bnd": raw.get("DYN_target_bnd"),
             "ema_alpha": raw.get("DYN_ema_alpha"),
+            "ema_gamma": raw.get("DYN_ema_gamma"),
             "median_window": raw.get("DYN_median_window"),
             "keep_gap": raw.get("DYN_keep_gap"),
             "fallback_rule": raw.get("DYN_fallback_rule"),
             "gamma_last": raw.get("DYN_gamma_last"),
             "stall_rounds": raw.get("DYN_stall_rounds"),
+            "time_unit": raw.get("DYN_time_unit"),
+            "time_span": raw.get("DYN_time_span"),
+            "window_unit": raw.get("DYN_window_unit"),
+            "window_span": raw.get("DYN_window_span"),
+            "seasonal_group": raw.get("DYN_seasonal_group"),
+            "seasonal_prior_weight": raw.get("DYN_seasonal_prior_weight"),
+            "seasonal_min_samples": raw.get("DYN_seasonal_min_samples"),
         }
 
     # Drift detector
@@ -192,6 +203,8 @@ def extract_vars(cfg: dict) -> dict:
     V["TEST_SIZE"] = D["test_size"]
     V["VAL_SIZE"] = D["val_size"]
     V["SEED"] = D["random_state"]
+    if D.get("start_year") is not None:
+        V["DATA_START_YEAR"] = D["start_year"]
 
     L = cfg["LEVEL"]
     V["LEVEL_PCTS"] = L["level_pcts"]; V["RANKER"] = L["ranker"]
@@ -210,6 +223,10 @@ def extract_vars(cfg: dict) -> dict:
     V["GWB_bandwidth_scale"] = G["bandwidth_scale"]
     V["GWB_use_faiss"] = G["use_faiss"]
     V["GWB_faiss_gpu"] = G["faiss_gpu"]
+    if G.get("categorical_features") is not None:
+        V["GWB_categorical_features"] = G["categorical_features"]
+    if G.get("category_penalty") is not None:
+        V["GWB_category_penalty"] = G["category_penalty"]
 
     S = cfg["S3WD"]
     V["S3_c1"]=S["c1"]; V["S3_c2"]=S["c2"]; V["S3_xi_min"]=S["xi_min"]
@@ -232,11 +249,27 @@ def extract_vars(cfg: dict) -> dict:
         V["DYN_window_size"] = Y.get("window_size")
         V["DYN_target_bnd"] = Y["target_bnd"]
         V["DYN_ema_alpha"] = Y.get("ema_alpha")
+        if Y.get("ema_gamma") is not None:
+            V["DYN_ema_gamma"] = Y.get("ema_gamma")
         V["DYN_median_window"] = Y.get("median_window")
         V["DYN_keep_gap"] = Y.get("keep_gap")
         V["DYN_fallback_rule"] = Y.get("fallback_rule")
         V["DYN_gamma_last"] = Y.get("gamma_last")
         V["DYN_stall_rounds"] = Y.get("stall_rounds")
+        if Y.get("time_unit") is not None:
+            V["DYN_time_unit"] = Y["time_unit"]
+        if Y.get("time_span") is not None:
+            V["DYN_time_span"] = Y["time_span"]
+        if Y.get("window_unit") is not None:
+            V["DYN_window_unit"] = Y["window_unit"]
+        if Y.get("window_span") is not None:
+            V["DYN_window_span"] = Y["window_span"]
+        if Y.get("seasonal_group") is not None:
+            V["DYN_seasonal_group"] = Y["seasonal_group"]
+        if Y.get("seasonal_prior_weight") is not None:
+            V["DYN_seasonal_prior_weight"] = Y["seasonal_prior_weight"]
+        if Y.get("seasonal_min_samples") is not None:
+            V["DYN_seasonal_min_samples"] = Y["seasonal_min_samples"]
 
     if "DRIFT" in cfg:
         R = cfg["DRIFT"]

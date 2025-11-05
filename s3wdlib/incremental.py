@@ -50,6 +50,7 @@ class PosteriorUpdater:
         self._estimator: object | None = None
         self._buffer_X: np.ndarray | None = None
         self._buffer_y: np.ndarray | None = None
+        self._buffer_cat: np.ndarray | None = None
         self._n_total: int = 0
         self._since_rebuild: int = 0
         self._base_rebuild_interval: int = int(self.rebuild_interval)
@@ -64,6 +65,7 @@ class PosteriorUpdater:
         self._estimator = None
         self._buffer_X = None
         self._buffer_y = None
+        self._buffer_cat = None
         self._n_total = 0
         self._since_rebuild = 0
         self._current_rebuild_interval = self._base_rebuild_interval
@@ -82,6 +84,7 @@ class PosteriorUpdater:
         X_batch: np.ndarray | Iterable[Iterable[float]],
         y_batch: np.ndarray | Iterable[int],
         drift_event: DriftEvent | None = None,
+        categorical_batch: np.ndarray | Iterable[Iterable[object]] | None = None,
     ) -> object | None:
         """摄入一批新样本，并视情况执行增量或完整重建。"""
 
@@ -93,13 +96,21 @@ class PosteriorUpdater:
         if X_arr.shape[0] != y_arr.shape[0]:
             raise ValueError("X_batch 与 y_batch 的样本数不一致。")
 
-        self._ingest_batch(X_arr, y_arr)
+        cat_arr: np.ndarray | None = None
+        if categorical_batch is not None:
+            cat_arr = np.asarray(categorical_batch, dtype=object)
+            if cat_arr.ndim == 1:
+                cat_arr = cat_arr.reshape(-1, 1)
+            if cat_arr.shape[0] != y_arr.shape[0]:
+                raise ValueError("categorical_batch 与标签数量不一致。")
+
+        self._ingest_batch(X_arr, y_arr, cat_arr)
         if drift_event is not None:
             self._on_drift_event(drift_event)
 
         appended = False
         if not self._pending_rebuild and self._estimator is not None:
-            appended = self._try_faiss_append(X_arr, y_arr)
+            appended = self._try_faiss_append(X_arr, y_arr, cat_arr)
             if appended:
                 self._since_rebuild += X_arr.shape[0]
                 _logger.info(
@@ -119,49 +130,120 @@ class PosteriorUpdater:
         return self.current_estimator()
 
     # ------------------------------------------------------------------
-    def _ingest_batch(self, X_arr: np.ndarray, y_arr: np.ndarray) -> None:
+    def _ingest_batch(
+        self,
+        X_arr: np.ndarray,
+        y_arr: np.ndarray,
+        cat_arr: np.ndarray | None,
+    ) -> None:
         self._n_total += int(X_arr.shape[0])
         if self.cache_strategy == "sliding":
-            self._ingest_sliding(X_arr, y_arr)
+            self._ingest_sliding(X_arr, y_arr, cat_arr)
         else:
-            self._ingest_reservoir(X_arr, y_arr)
+            self._ingest_reservoir(X_arr, y_arr, cat_arr)
 
-    def _ingest_sliding(self, X_arr: np.ndarray, y_arr: np.ndarray) -> None:
+    def _ingest_sliding(
+        self,
+        X_arr: np.ndarray,
+        y_arr: np.ndarray,
+        cat_arr: np.ndarray | None,
+    ) -> None:
         if self._buffer_X is None:
             self._buffer_X = np.asarray(X_arr, dtype=float)
             self._buffer_y = np.asarray(y_arr, dtype=int)
+            if cat_arr is not None:
+                self._buffer_cat = np.asarray(cat_arr, dtype=object)
         else:
             self._buffer_X = np.concatenate([self._buffer_X, X_arr], axis=0)
             self._buffer_y = np.concatenate([self._buffer_y, y_arr], axis=0)
+            if cat_arr is not None:
+                cat_np = np.asarray(cat_arr, dtype=object)
+                if self._buffer_cat is None:
+                    self._buffer_cat = cat_np
+                else:
+                    self._buffer_cat = np.concatenate([self._buffer_cat, cat_np], axis=0)
+            elif self._buffer_cat is not None:
+                fill = np.full((X_arr.shape[0], self._buffer_cat.shape[1]), "__MISSING__", dtype=object)
+                self._buffer_cat = np.concatenate([self._buffer_cat, fill], axis=0)
         overflow = self._buffer_y.shape[0] - self.buffer_size
         if overflow > 0:
             self._buffer_X = self._buffer_X[overflow:]
             self._buffer_y = self._buffer_y[overflow:]
+            if self._buffer_cat is not None:
+                self._buffer_cat = self._buffer_cat[overflow:]
             self._pending_rebuild = True
             _logger.info(
                 "【滑动窗口】缓存超限，丢弃最早 %d 条样本，已触发重建标记。",
                 overflow,
             )
 
-    def _ingest_reservoir(self, X_arr: np.ndarray, y_arr: np.ndarray) -> None:
+    def _ingest_reservoir(
+        self,
+        X_arr: np.ndarray,
+        y_arr: np.ndarray,
+        cat_arr: np.ndarray | None,
+    ) -> None:
         replaced = False
+        cat_np = np.asarray(cat_arr, dtype=object) if cat_arr is not None else None
         if self._buffer_X is None:
             keep = min(self.buffer_size, X_arr.shape[0])
             self._buffer_X = np.asarray(X_arr[:keep], dtype=float)
             self._buffer_y = np.asarray(y_arr[:keep], dtype=int)
+            if cat_np is not None:
+                self._buffer_cat = np.asarray(cat_np[:keep], dtype=object)
             self._reservoir_seen = keep
         else:
-            for xi, yi in zip(X_arr, y_arr):
+            for idx, (xi, yi) in enumerate(zip(X_arr, y_arr)):
                 self._reservoir_seen += 1
+                cat_row = cat_np[idx] if cat_np is not None else None
                 if self._buffer_y.shape[0] < self.buffer_size:
                     self._buffer_X = np.vstack([self._buffer_X, xi])
                     self._buffer_y = np.concatenate([self._buffer_y, [yi]])
+                    if cat_row is not None:
+                        if self._buffer_cat is None:
+                            self._buffer_cat = np.asarray(cat_row, dtype=object).reshape(1, -1)
+                        else:
+                            self._buffer_cat = np.concatenate(
+                                [self._buffer_cat, np.asarray(cat_row, dtype=object).reshape(1, -1)],
+                                axis=0,
+                            )
+                    elif self._buffer_cat is not None:
+                        self._buffer_cat = np.concatenate(
+                            [
+                                self._buffer_cat,
+                                np.full((1, self._buffer_cat.shape[1]), "__MISSING__", dtype=object),
+                            ],
+                            axis=0,
+                        )
                     replaced = True
                     continue
                 j = self._rng.randint(0, self._reservoir_seen - 1)
                 if j < self.buffer_size:
                     self._buffer_X[j] = xi
                     self._buffer_y[j] = yi
+                    if cat_row is not None:
+                        if self._buffer_cat is None:
+                            self._buffer_cat = np.full(
+                                (self.buffer_size, np.asarray(cat_row, dtype=object).reshape(1, -1).shape[1]),
+                                "__MISSING__",
+                                dtype=object,
+                            )
+                        if self._buffer_cat.shape[0] < self.buffer_size:
+                            pad_rows = self.buffer_size - self._buffer_cat.shape[0]
+                            self._buffer_cat = np.concatenate(
+                                [
+                                    self._buffer_cat,
+                                    np.full(
+                                        (pad_rows, self._buffer_cat.shape[1]),
+                                        "__MISSING__",
+                                        dtype=object,
+                                    ),
+                                ],
+                                axis=0,
+                            )
+                        self._buffer_cat[j] = np.asarray(cat_row, dtype=object)
+                    elif self._buffer_cat is not None:
+                        self._buffer_cat[j] = np.full(self._buffer_cat.shape[1], "__MISSING__", dtype=object)
                     replaced = True
         if replaced:
             self._pending_rebuild = True
@@ -170,7 +252,12 @@ class PosteriorUpdater:
             )
 
     # ------------------------------------------------------------------
-    def _try_faiss_append(self, X_arr: np.ndarray, y_arr: np.ndarray) -> bool:
+    def _try_faiss_append(
+        self,
+        X_arr: np.ndarray,
+        y_arr: np.ndarray,
+        cat_arr: np.ndarray | None,
+    ) -> bool:
         if not self.enable_faiss_append:
             return False
         estimator = self._estimator
@@ -186,6 +273,12 @@ class PosteriorUpdater:
                 estimator.y_tr = np.concatenate([np.asarray(estimator.y_tr), y_arr])
             elif hasattr(estimator, "y_tr"):
                 estimator.y_tr = np.asarray(y_arr)
+            if cat_arr is not None and hasattr(estimator, "_cat_tr"):
+                cat_np = np.asarray(cat_arr, dtype=object)
+                if estimator._cat_tr is None:
+                    estimator._cat_tr = cat_np
+                else:
+                    estimator._cat_tr = np.concatenate([estimator._cat_tr, cat_np], axis=0)
             if hasattr(estimator, "_k_effective") and estimator._k_effective is not None:
                 estimator._k_effective = int(min(getattr(estimator, "k", estimator._k_effective), estimator.y_tr.shape[0]))
             return True
@@ -199,7 +292,10 @@ class PosteriorUpdater:
         if self._buffer_X is None or self._buffer_y is None:
             return
         estimator = self.estimator_factory()
-        estimator.fit(self._buffer_X, self._buffer_y)
+        if self._buffer_cat is not None:
+            estimator.fit(self._buffer_X, self._buffer_y, categorical_values=self._buffer_cat)
+        else:
+            estimator.fit(self._buffer_X, self._buffer_y)
         self._estimator = estimator
         self._since_rebuild = 0
         self._pending_rebuild = False

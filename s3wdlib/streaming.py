@@ -33,6 +33,13 @@ class DynamicLoopConfig:
     rlite_interval: int = 10
     rlite_grid_step: float = 0.02
     rlite_grid_radius: int = 2
+    time_unit: str = "samples"
+    time_span: int = 1
+    window_unit: Optional[str] = None
+    window_span: Optional[int] = None
+    seasonal_group: str = "month"
+    seasonal_prior_weight: float = 0.0
+    seasonal_min_samples: int = 512
 
     def make_pso_params(self, base: Optional[PSOParams] = None) -> PSOParams:
         """Return a :class:`PSOParams` instance tailored for the configured strategy."""
