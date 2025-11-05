@@ -8,6 +8,7 @@ DATA:
   test_size: 0.50  # 测试集占总数据集的比例，设置为50%
   val_size: 0.30   # 验证集占总数据集的比例，设置为30%
   random_state: 42
+  start_year: 2018
 
 LEVEL:
   level_pcts: [0.6, 0.8, 1.0]
@@ -21,48 +22,58 @@ KWB:
   faiss_gpu: true
 
 GWB:
-  k: 6
+  k: 10
   metric: "euclidean"
   eps: 1.0e-6
   mode: "epanechnikov"
-  bandwidth: 0.4
-  bandwidth_scale: 1.0
+  bandwidth: 0.62
+  bandwidth_scale: 1.05
   use_faiss: true
   faiss_gpu: true
+  categorical_features: ["Origin", "Dest"]
+  category_penalty: 0.30
 
 S3WD:
-  c1: 0.37
-  c2: 0.63
-  xi_min: 0.10
-  theta_pos: 0.6
-  theta_neg: 0.1
-  sigma: 3.0
+  c1: 0.33
+  c2: 0.67
+  xi_min: 0.06
+  theta_pos: 0.72
+  theta_neg: 0.10
+  sigma: 2.6
   regret_mode: "utility"
   penalty_large: 1000000.0
   gamma_last: true
-  gap: 0.02
+  gap: 0.03
 
 PSO:
-  particles: 20
-  iters: 20
-  w_max: 0.9
-  w_min: 0.4
-  c1: 2.8
-  c2: 1.3
+  particles: 28
+  iters: 28
+  w_max: 0.85
+  w_min: 0.35
+  c1: 2.6
+  c2: 1.45
   seed: 42
   use_gpu: true
 
 DYN:
   strategy: "windowed_pso"
-  step: 256
-  window_size: 512
-  target_bnd: 0.18
-  ema_alpha: 0.6
-  median_window: 3
-  keep_gap: 0.02
+  step: 128
+  window_size: 384
+  target_bnd: 0.16
+  ema_alpha: 0.45
+  ema_gamma: 0.5
+  median_window: 7
+  keep_gap: 0.035
   fallback_rule: true
-  gamma_last: 0.5
-  stall_rounds: 8
+  gamma_last: 0.58
+  stall_rounds: 16
+  time_unit: "month"
+  time_span: 1
+  window_unit: "month"
+  window_span: 1
+  seasonal_group: "month"
+  seasonal_prior_weight: 0.35
+  seasonal_min_samples: 2000
 
 DRIFT:
   method: "kswin"
