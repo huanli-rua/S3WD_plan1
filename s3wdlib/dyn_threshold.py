@@ -293,7 +293,7 @@ def adapt_thresholds_windowed_pso(
 
     def _evaluate(vec: np.ndarray) -> Tuple[float, Dict[str, float], np.ndarray, np.ndarray, float, bool]:
         raw_alpha = np.clip(vec[:nL], 0.0, 1.0)
-        raw_beta = np.clip(vec[nL:], 0.0, 1.0)
+        raw_beta = np.clip(vec[nL:2*nL], 0.0, 1.0)
         if search_gamma:
             raw_gamma = float(np.clip(vec[2 * nL], 0.01, 0.99))
         else:

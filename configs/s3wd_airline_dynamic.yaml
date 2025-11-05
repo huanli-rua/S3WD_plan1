@@ -5,8 +5,8 @@ DATA:
   continuous_label: "DepDelay"
   threshold: 15
   threshold_op: ">"
-  test_size: 0.30
-  val_size: 0.30
+  test_size: 0.50  # 测试集占总数据集的比例，设置为50%
+  val_size: 0.30   # 验证集占总数据集的比例，设置为30%
   random_state: 42
 
 LEVEL:
@@ -25,7 +25,7 @@ GWB:
   metric: "euclidean"
   eps: 1.0e-6
   mode: "epanechnikov"
-  bandwidth: 0.8
+  bandwidth: 0.4
   bandwidth_scale: 1.0
   use_faiss: true
   faiss_gpu: true
@@ -34,7 +34,7 @@ S3WD:
   c1: 0.37
   c2: 0.63
   xi_min: 0.10
-  theta_pos: 0.9
+  theta_pos: 0.6
   theta_neg: 0.1
   sigma: 3.0
   regret_mode: "utility"
