@@ -50,3 +50,55 @@ PSO_c1: 2.8          # 个体学习因子（认知参数）
 PSO_c2: 1.3          # 社会学习因子（社会参数）
 PSO_seed: 42         # 随机数生成器的种子值，用于保证实验可重复性
 PSO_use_gpu: true    # 是否在 GPU 上运行 PSO（依赖 CuPy，自动检测环境）
+
+# === v02 · 分桶 / 参考元组 / 相似度 / 阈值 ===
+BUCKET:
+  keys: [UniqueCarrier, Origin, Dest, dep_hour]
+  min_bucket: 500
+  backoff: [[UniqueCarrier, Origin, Dest], [Origin, Dest], [Origin]]
+
+REF_TUPLE:
+  topk_per_class: 256
+  pos_quantile: 0.7
+  keep_history_ratio: 0.3
+  use_gwb_weight: true
+
+SIMILARITY:
+  kernel: rbf
+  sigma: 0.5
+  cat_weights: {carrier: 0.4, origin: 0.2, dest: 0.2, dow: 0.1, month: 0.1}
+  combine: product
+  mix_alpha: 0.7
+
+MEASURE:
+  objective: expected_cost
+  costs: {c_fn: 1.0, c_fp: 0.4, c_bnd: 0.2}
+  grid: {alpha: [0.55, 0.9, 0.02], beta: [0.05, 0.45, 0.02]}
+  constraints: {keep_gap: 0.05, min_pos_coverage: 0.02, bnd_cap: 0.35}
+
+SMOOTH:
+  ema_alpha: 0.6
+  step_cap: {alpha: 0.08, beta: 0.08}
+
+DRIFT:
+  method: kswin
+  window_size: 512
+  stat_size: 128
+  psi_thresholds: {warn: 0.1, alert: 0.25}
+  tv_thresholds: {warn: 0.1, alert: 0.2}
+  posrate_shift: {warn: 0.05, alert: 0.10}
+  perf_drop: {warn: 0.10, alert: 0.20}
+  debounce_windows: 3
+  actions:
+    S1: {sigma_factor: [1.2, 0.85], redo_threshold: true}
+    S2: {rebuild_ref_tuple: true, keep_history_ratio: 0.3, redo_threshold: true}
+    S3:
+      rebuild_ref_tuple: true
+      rebuild_gwb_index: true
+      keep_history_ratio: 0.3
+      tighten: {keep_gap: 0.08, bnd_cap: 0.25, step_cap: 0.05}
+      cooldown_windows: 3
+
+SWITCH:
+  enable_ref_tuple: true
+  enable_pso: false
