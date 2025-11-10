@@ -9,8 +9,91 @@ from .streaming import DynamicLoopConfig, DriftDetectorConfig, PosteriorUpdaterC
 #   S3_sigma: 3.0
 #   S3_regret_mode: utility
 REQUIRED_GROUPS = {"DATA", "LEVEL", "KWB", "GWB", "S3WD", "PSO"}
-OPTIONAL_GROUPS = {"DYN", "DRIFT", "INCR"}
+OPTIONAL_GROUPS = {
+    "DYN",
+    "DRIFT",
+    "INCR",
+    "BUCKET",
+    "REF_TUPLE",
+    "SIMILARITY",
+    "MEASURE",
+    "SMOOTH",
+    "SWITCH",
+}
 GROUPS = REQUIRED_GROUPS | OPTIONAL_GROUPS
+
+
+V02_DEFAULTS = {
+    "BUCKET": {
+        "keys": ["UniqueCarrier", "Origin", "Dest", "dep_hour"],
+        "min_bucket": 500,
+        "backoff": [["UniqueCarrier", "Origin", "Dest"], ["Origin", "Dest"], ["Origin"]],
+    },
+    "REF_TUPLE": {
+        "topk_per_class": 256,
+        "pos_quantile": 0.7,
+        "keep_history_ratio": 0.3,
+        "use_gwb_weight": True,
+    },
+    "SIMILARITY": {
+        "kernel": "rbf",
+        "sigma": 0.5,
+        "cat_weights": {"carrier": 0.4, "origin": 0.2, "dest": 0.2, "dow": 0.1, "month": 0.1},
+        "combine": "product",
+        "mix_alpha": 0.7,
+    },
+    "MEASURE": {
+        "objective": "expected_cost",
+        "costs": {"c_fn": 1.0, "c_fp": 0.4, "c_bnd": 0.2},
+        "grid": {"alpha": [0.55, 0.9, 0.02], "beta": [0.05, 0.45, 0.02]},
+        "constraints": {"keep_gap": 0.05, "min_pos_coverage": 0.02, "bnd_cap": 0.35},
+    },
+    "SMOOTH": {
+        "ema_alpha": 0.6,
+        "step_cap": {"alpha": 0.08, "beta": 0.08},
+    },
+    "DRIFT": {
+        "method": "kswin",
+        "window_size": 512,
+        "stat_size": 128,
+        "psi_thresholds": {"warn": 0.1, "alert": 0.25},
+        "tv_thresholds": {"warn": 0.1, "alert": 0.2},
+        "posrate_shift": {"warn": 0.05, "alert": 0.1},
+        "perf_drop": {"warn": 0.1, "alert": 0.2},
+        "debounce_windows": 3,
+        "actions": {
+            "S1": {"sigma_factor": [1.2, 0.85], "redo_threshold": True},
+            "S2": {"rebuild_ref_tuple": True, "keep_history_ratio": 0.3, "redo_threshold": True},
+            "S3": {
+                "rebuild_ref_tuple": True,
+                "rebuild_gwb_index": True,
+                "keep_history_ratio": 0.3,
+                "tighten": {"keep_gap": 0.08, "bnd_cap": 0.25, "step_cap": 0.05},
+                "cooldown_windows": 3,
+            },
+        },
+    },
+    "SWITCH": {"enable_ref_tuple": True, "enable_pso": False},
+}
+
+
+def _inject_v02_defaults(cfg: dict) -> dict:
+    """补齐 v02 新增分组的默认值（缺键时赋值）。"""
+
+    for section, defaults in V02_DEFAULTS.items():
+        sec = cfg.setdefault(section, {})
+        if not isinstance(sec, dict):
+            cfg[section] = dict(defaults)
+            continue
+        for key, val in defaults.items():
+            sec.setdefault(key, val if not isinstance(val, dict) else _clone_dict(val))
+    return cfg
+
+
+def _clone_dict(val: dict) -> dict:
+    """浅拷贝字典，避免默认值被原地修改。"""
+
+    return {k: (_clone_dict(v) if isinstance(v, dict) else v) for k, v in val.items()}
 
 def _normalize_flat_to_grouped(raw: dict) -> dict:
     """将扁平键名（例如 S3_sigma）映射为内部分组结构，兼容旧配置。"""
@@ -165,6 +248,8 @@ def load_yaml_cfg(path: str) -> dict:
     if missing:
         raise KeyError(f"YAML 缺少分组: {missing}，必须包含 {sorted(REQUIRED_GROUPS)}")
 
+    cfg = _inject_v02_defaults(cfg)
+
     # 严格项校验
     _require(cfg["DATA"], "DATA", ["data_dir","data_file","test_size","val_size","random_state"])
     # Either continuous or label_col
@@ -281,6 +366,19 @@ def extract_vars(cfg: dict) -> dict:
         V["DRIFT_cooldown"] = R.get("cooldown")
         V["DRIFT_min_window_length"] = R.get("min_window_length")
 
+        # v02 漂移拓展
+        if R.get("psi_thresholds") is not None:
+            V["DRIFT_psi_thresholds"] = R["psi_thresholds"]
+        if R.get("tv_thresholds") is not None:
+            V["DRIFT_tv_thresholds"] = R["tv_thresholds"]
+        if R.get("posrate_shift") is not None:
+            V["DRIFT_posrate_shift"] = R["posrate_shift"]
+        if R.get("perf_drop") is not None:
+            V["DRIFT_perf_drop"] = R["perf_drop"]
+        V["DRIFT_debounce_windows"] = R.get("debounce_windows")
+        if R.get("actions") is not None:
+            V["DRIFT_actions"] = R["actions"]
+
     if "INCR" in cfg:
         I = cfg["INCR"]
         V["INCR_buffer_size"] = I["buffer_size"]
@@ -291,11 +389,65 @@ def extract_vars(cfg: dict) -> dict:
         V["INCR_immediate_rebuild_methods"] = I.get("immediate_rebuild_methods")
         V["INCR_enable_faiss_append"] = I.get("enable_faiss_append")
         V["INCR_random_state"] = I.get("random_state")
+
+    if "BUCKET" in cfg:
+        B = cfg["BUCKET"]
+        V["BUCKET_keys"] = B.get("keys")
+        V["BUCKET_min_bucket"] = B.get("min_bucket")
+        V["BUCKET_backoff"] = B.get("backoff")
+
+    if "REF_TUPLE" in cfg:
+        Rf = cfg["REF_TUPLE"]
+        V["REF_topk_per_class"] = Rf.get("topk_per_class")
+        V["REF_pos_quantile"] = Rf.get("pos_quantile")
+        V["REF_keep_history_ratio"] = Rf.get("keep_history_ratio")
+        V["REF_use_gwb_weight"] = Rf.get("use_gwb_weight")
+
+    if "SIMILARITY" in cfg:
+        S2 = cfg["SIMILARITY"]
+        V["SIM_kernel"] = S2.get("kernel")
+        V["SIM_sigma"] = S2.get("sigma")
+        V["SIM_cat_weights"] = S2.get("cat_weights")
+        V["SIM_combine"] = S2.get("combine")
+        V["SIM_mix_alpha"] = S2.get("mix_alpha")
+
+    if "MEASURE" in cfg:
+        M = cfg["MEASURE"]
+        V["MEASURE_objective"] = M.get("objective")
+        V["MEASURE_costs"] = M.get("costs")
+        V["MEASURE_grid"] = M.get("grid")
+        V["MEASURE_constraints"] = M.get("constraints")
+
+    if "SMOOTH" in cfg:
+        Sm = cfg["SMOOTH"]
+        V["SMOOTH_ema_alpha"] = Sm.get("ema_alpha")
+        V["SMOOTH_step_cap"] = Sm.get("step_cap")
+
+    if "SWITCH" in cfg:
+        Sw = cfg["SWITCH"]
+        V["SWITCH_enable_ref_tuple"] = Sw.get("enable_ref_tuple")
+        V["SWITCH_enable_pso"] = Sw.get("enable_pso")
     return V
 
 def show_cfg(cfg: dict) -> None:
     print("【配置快照】")
-    for grp in ["DATA","LEVEL","KWB","GWB","S3WD","PSO","DYN","DRIFT","INCR"]:
+    for grp in [
+        "DATA",
+        "LEVEL",
+        "KWB",
+        "GWB",
+        "S3WD",
+        "PSO",
+        "BUCKET",
+        "REF_TUPLE",
+        "SIMILARITY",
+        "MEASURE",
+        "SMOOTH",
+        "SWITCH",
+        "DYN",
+        "DRIFT",
+        "INCR",
+    ]:
         if grp in cfg:
             print(f"- {grp}: {cfg[grp]}")
 

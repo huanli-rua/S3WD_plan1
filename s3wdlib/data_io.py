@@ -15,6 +15,22 @@ from sklearn.preprocessing import MinMaxScaler
 from scipy.io import arff
 import csv
 
+
+def _time_to_minutes(val) -> int:
+    """将 HHMM 时间编码转换为分钟，输入可能为字符串或数值。"""
+
+    if pd.isna(val):
+        return 0
+    try:
+        iv = int(float(val))
+    except (TypeError, ValueError):
+        return 0
+    hour = iv // 100
+    minute = iv % 100
+    hour = max(0, min(23, hour))
+    minute = max(0, min(59, minute))
+    return hour * 60 + minute
+
 def load_table_auto(path: str,
                     label_col: Optional[str|int]=None,
                     positive_label=1,
@@ -125,3 +141,21 @@ def minmax_scale_fit_transform(X_tr: pd.DataFrame, X_te: pd.DataFrame):
     Xte2 = pd.DataFrame(scaler.transform(X_te), columns=X_te.columns)
     print("【归一化】已对训练/测试集进行 MinMax 缩放到 [0,1]。")
     return Xtr2, Xte2, scaler
+
+
+def augment_airline_features(df: pd.DataFrame) -> pd.DataFrame:
+    """添加航空运输常用的派生时间特征，保持输入副本不变。"""
+
+    if df is None or df.empty:
+        return df
+    enriched = df.copy()
+    if "CRSDepTime" in enriched.columns:
+        enriched["dep_hour"] = enriched["CRSDepTime"].apply(lambda v: _time_to_minutes(v) // 60)
+    if "CRSArrTime" in enriched.columns:
+        enriched["arr_hour"] = enriched["CRSArrTime"].apply(lambda v: _time_to_minutes(v) // 60)
+    if "CRSDepTime" in enriched.columns and "CRSArrTime" in enriched.columns:
+        dep_min = enriched["CRSDepTime"].apply(_time_to_minutes)
+        arr_min = enriched["CRSArrTime"].apply(_time_to_minutes)
+        block = (arr_min - dep_min) % (24 * 60)
+        enriched["block_time_min"] = block
+    return enriched
