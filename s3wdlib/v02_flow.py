@@ -433,6 +433,18 @@ def run_streaming_flow(
     )
     X_enriched = augment_airline_features(X_raw)
     X_enriched = _ensure_year_month(X_enriched, start_year=start_year_cfg)
+    categorical_candidates = [
+        c for c in ["UniqueCarrier", "Origin", "Dest", "DayOfWeek", "Month"] if c in X_enriched.columns
+    ]
+    categorical_set = set(categorical_candidates)
+    numeric_cols = [
+        col
+        for col in X_enriched.columns
+        if pd.api.types.is_numeric_dtype(X_enriched[col]) and col not in categorical_set
+    ]
+    if not numeric_cols:
+        raise ValueError("数据集中缺少可用于 GWB 估计的数值特征列。")
+    X_numeric = X_enriched[numeric_cols]
 
     warmup_periods, stream_periods = _prepare_windows(X_enriched, warmup_span)
     warmup_labels = [_period_to_str(p) for p in warmup_periods]
@@ -449,10 +461,11 @@ def run_streaming_flow(
 
     warmup_mask = X_enriched["period"].isin(warmup_periods)
     X_warm = X_enriched.loc[warmup_mask].reset_index(drop=True)
+    X_warm_num = X_numeric.loc[warmup_mask].reset_index(drop=True)
     y_warm = y.loc[warmup_mask].reset_index(drop=True)
     buckets_warm = assign_buckets(X_warm)
 
-    cat_cols = [c for c in ["UniqueCarrier", "Origin", "Dest", "DayOfWeek", "Month"] if c in X_warm.columns]
+    cat_cols = list(categorical_candidates)
 
     gwb_cfg = cfg["GWB"]
     gwb_estimator = GWBProbEstimator(
@@ -468,7 +481,7 @@ def run_streaming_flow(
         category_penalty=gwb_cfg.get("category_penalty", 0.3),
     )
     gwb_estimator.fit(
-        X_warm.values,
+        X_warm_num.values,
         y_warm.to_numpy(),
         categorical_values=X_warm[cat_cols] if cat_cols else None,
     )
@@ -477,7 +490,7 @@ def run_streaming_flow(
     gwb_prob_warm = None
     if use_gwb_weight:
         gwb_prob_warm = gwb_estimator.predict_proba(
-            X_warm.values,
+            X_warm_num.values,
             categorical_values=X_warm[cat_cols] if cat_cols else None,
         )
 
@@ -1008,7 +1021,7 @@ def run_streaming_flow(
 
         if use_gwb_weight:
             record.gwb_prob = gwb_estimator.predict_proba(
-                X_block.values,
+                X_block[numeric_cols].values,
                 categorical_values=X_block[cat_cols] if cat_cols else None,
             )
 
@@ -1016,15 +1029,16 @@ def run_streaming_flow(
         if runtime_state.get("rebuild_gwb_index") and use_gwb_weight:
             if reservoir.global_history:
                 hist_X = pd.concat([rec.X for rec in reservoir.global_history], ignore_index=True)
+                hist_X_num = hist_X[numeric_cols]
                 hist_y = np.concatenate([rec.y for rec in reservoir.global_history])
                 gwb_estimator.fit(
-                    hist_X.values,
+                    hist_X_num.values,
                     hist_y,
                     categorical_values=hist_X[cat_cols] if cat_cols else None,
                 )
                 for rec in reservoir.global_history:
                     rec.gwb_prob = gwb_estimator.predict_proba(
-                        rec.X.values,
+                        rec.X[numeric_cols].values,
                         categorical_values=rec.X[cat_cols] if cat_cols else None,
                     )
             runtime_state["rebuild_gwb_index"] = False
