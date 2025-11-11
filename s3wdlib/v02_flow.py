@@ -289,15 +289,30 @@ def _period_to_str(period: pd.Period) -> str:
 def _build_figures(metrics_by_year: pd.DataFrame, output_dir: Path) -> None:
     set_chinese_font()
     fix_minus()
-    for metric in ["Prec", "Rec", "F1", "BAC", "MCC", "Kappa", "AUC"]:
+    metric_map = {
+        "Precision": "精确率",
+        "Recall": "召回率",
+        "F1": "F1",
+        "BAC": "平衡准确率",
+        "MCC": "MCC",
+        "Kappa": "Kappa",
+        "AUC": "AUC",
+        "BND_ratio": "边界域占比",
+        "POS_coverage": "正类覆盖率",
+    }
+    years = metrics_by_year.index.astype(int)
+    for metric, zh_label in metric_map.items():
+        if metric not in metrics_by_year.columns:
+            continue
         fig, ax = plt.subplots(figsize=(6, 4))
-        ax.plot(metrics_by_year.index.astype(int), metrics_by_year[metric], marker="o", linewidth=2)
+        ax.plot(years, metrics_by_year[metric], marker="o", linewidth=2)
         ax.set_xlabel("年份")
-        ax.set_ylabel(metric)
-        ax.set_title(f"{metric} 年度走势")
+        ax.set_ylabel(zh_label)
+        ax.set_title(f"【年度指标】{zh_label}（按年加权平均）")
+        ax.set_xticks(years)
         ax.grid(alpha=0.3, linestyle="--")
         fig.tight_layout()
-        fig_path = output_dir / f"metric_{metric.lower()}_by_year.png"
+        fig_path = output_dir / f"yearly_{metric.lower()}.png"
         fig.savefig(fig_path, dpi=150)
         plt.close(fig)
 
@@ -794,22 +809,34 @@ def run_streaming_flow(
             }
         )
 
+        pred_region = np.where(stats["positive"], 1, np.where(stats["negative"], -1, 0))
+        y_pred_label = np.where(pred_region == 1, 1, 0)
+        metrics_month = classification_metrics(y_block, y_pred_label, stats["P_block"]["p_pos"])
+        precision = float(metrics_month.pop("Prec"))
+        recall = float(metrics_month.pop("Rec"))
+
         window_metrics.append(
             {
+                "year": int(period.year),
+                "month": int(period.month),
                 "window": _period_to_str(period),
+                "n_samples": int(len(X_block)),
+                "Precision": precision,
+                "Recall": recall,
+                **metrics_month,
                 "psi": float(psi_val),
                 "tv": float(tv_val),
                 "posrate_gap": float(posrate_gap),
                 "posrate": posrate_curr,
                 "perf_drop": float(stats["perf_drop"]),
-                "bnd_ratio": float(stats["bnd_ratio"]),
+                "BND_ratio": float(stats["bnd_ratio"]),
+                "POS_coverage": float(stats["pos_cov"]),
                 "alpha": float(stats["alpha_smooth"]),
                 "beta": float(stats["beta_smooth"]),
                 "constraint_resolution": stats.get("constraint_resolution", ""),
             }
         )
 
-        pred_region = np.where(stats["positive"], 1, np.where(stats["negative"], -1, 0))
         alpha_prev, beta_prev = stats["alpha_smooth"], stats["beta_smooth"]
 
         record = WindowRecord(
@@ -867,12 +894,14 @@ def run_streaming_flow(
                 "period": period,
                 "y_true": y_block.to_numpy(),
                 "y_prob": stats["P_block"]["p_pos"],
-                "y_pred": np.where(pred_region == 1, 1, 0),
+                "y_pred": y_pred_label,
             }
         )
 
     trace_df = pd.DataFrame(threshold_trace)
     metrics_df = pd.DataFrame(window_metrics)
+    if not metrics_df.empty:
+        metrics_df.sort_values(["year", "month"], inplace=True)
     drift_df = pd.DataFrame(drift_events)
 
     trace_path = data_dir / "threshold_trace_v02.csv"
@@ -882,25 +911,73 @@ def run_streaming_flow(
     metrics_df.to_csv(metrics_path, index=False)
     drift_df.to_csv(drift_path, index=False)
 
-    eval_rows: List[Dict[str, float]] = []
-    grouped: Dict[int, Dict[str, List[np.ndarray]]] = {}
-    for record in prediction_records:
-        year = int(record["period"].year)
-        grouped.setdefault(year, {"y": [], "pred": [], "prob": []})
-        grouped[year]["y"].append(record["y_true"])
-        grouped[year]["pred"].append(record["y_pred"])
-        grouped[year]["prob"].append(record["y_prob"])
+    yearly_rows: List[Dict[str, float]] = []
+    metric_columns = [
+        "Precision",
+        "Recall",
+        "F1",
+        "BAC",
+        "MCC",
+        "Kappa",
+        "AUC",
+        "BND_ratio",
+        "POS_coverage",
+    ]
 
-    for year, payload in sorted(grouped.items()):
-        y_true = np.concatenate(payload["y"])
-        y_pred = np.concatenate(payload["pred"])
-        y_prob = np.concatenate(payload["prob"])
-        metrics = classification_metrics(y_true, y_pred, y_prob)
-        metrics["Year"] = year
-        eval_rows.append(metrics)
+    if metrics_df.empty:
+        metrics_by_year = pd.DataFrame(columns=["n_samples", *metric_columns])
+        metrics_by_year.to_csv(data_dir / "yearly_metrics.csv")
+        _build_figures(metrics_by_year, data_dir)
+        return {
+            "threshold_trace": trace_df,
+            "window_metrics": metrics_df,
+            "drift_events": drift_df,
+            "metrics_by_year": metrics_by_year,
+            "yearly_metrics": metrics_by_year,
+        }
 
-    metrics_by_year = pd.DataFrame(eval_rows).set_index("Year").sort_index()
-    metrics_by_year.to_csv(data_dir / "metrics_by_year.csv")
+    def _weighted_average(values: pd.Series, weights: Optional[pd.Series]) -> float:
+        arr = values.to_numpy(dtype=float)
+        mask = ~np.isnan(arr)
+        if not mask.any():
+            return float("nan")
+        if weights is None:
+            return float(np.nanmean(arr[mask]))
+        weight_arr = weights.to_numpy(dtype=float)[mask]
+        total = np.sum(weight_arr)
+        if not np.isfinite(total) or total <= 0:
+            return float(np.nanmean(arr[mask]))
+        return float(np.dot(arr[mask], weight_arr) / total)
+
+    for year, group in metrics_df.groupby("year", sort=True):
+        weights = group["n_samples"].astype(float)
+        weight_series = None if weights.isna().any() else weights
+        summary: Dict[str, float] = {"year": int(year)}
+        total_samples = float(np.nansum(weights.to_numpy()))
+        summary["n_samples"] = int(total_samples) if np.isfinite(total_samples) else 0
+        for column in metric_columns:
+            if column in group.columns:
+                summary[column] = _weighted_average(group[column], weight_series)
+            else:
+                summary[column] = float("nan")
+        yearly_rows.append(summary)
+
+        coverage = group["month"].nunique()
+        if coverage < 12:
+            log_msg = (
+                f"【年度汇总】year={int(year)}，F1={summary['F1']:.3f}，BAC={summary['BAC']:.3f}"
+                f"（权重=样本数={summary['n_samples']}，月份覆盖率={coverage}/12）"
+            )
+        else:
+            log_msg = (
+                f"【年度汇总】year={int(year)}，F1={summary['F1']:.3f}，BAC={summary['BAC']:.3f}"
+                f"（权重=样本数={summary['n_samples']}）"
+            )
+        _logger.info(log_msg)
+
+    metrics_by_year = pd.DataFrame(yearly_rows).set_index("year").sort_index()
+    yearly_path = data_dir / "yearly_metrics.csv"
+    metrics_by_year.to_csv(yearly_path)
 
     _build_figures(metrics_by_year, data_dir)
 
@@ -909,6 +986,7 @@ def run_streaming_flow(
         "window_metrics": metrics_df,
         "drift_events": drift_df,
         "metrics_by_year": metrics_by_year,
+        "yearly_metrics": metrics_by_year,
     }
 
 
