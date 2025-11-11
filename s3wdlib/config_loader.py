@@ -19,6 +19,7 @@ OPTIONAL_GROUPS = {
     "MEASURE",
     "SMOOTH",
     "SWITCH",
+    "FLOW",
 }
 GROUPS = REQUIRED_GROUPS | OPTIONAL_GROUPS
 
@@ -74,6 +75,15 @@ V02_DEFAULTS = {
         },
     },
     "SWITCH": {"enable_ref_tuple": True, "enable_pso": False},
+    "FLOW": {
+        "warmup_windows": 6,
+        "recent_windows": 3,
+        "time_decay": 0.15,
+        "seasonal_neighbor": 0.7,
+        "seasonal_other": 0.4,
+        "weight_max": 2.5,
+        "history_cap": 12,
+    },
 }
 
 
@@ -447,6 +457,7 @@ def show_cfg(cfg: dict) -> None:
         "DYN",
         "DRIFT",
         "INCR",
+        "FLOW",
     ]:
         if grp in cfg:
             print(f"- {grp}: {cfg[grp]}")
