@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import re
 from typing import Callable, Optional, Sequence
 
 import numpy as np
@@ -103,6 +104,77 @@ class GWBProbEstimator:
         self._numeric_indices: np.ndarray | None = None
 
     @staticmethod
+    def _build_numeric_matrix(parts: list[np.ndarray]) -> np.ndarray:
+        if not parts:
+            raise ValueError("GWBProbEstimator 需要至少一个数值特征列用于距离计算。")
+        if len(parts) == 1:
+            return np.asarray(parts[0], dtype=float)
+        return np.concatenate([np.asarray(p, dtype=float) for p in parts], axis=1)
+
+    @staticmethod
+    def _parse_year_month_label(value) -> float:
+        if value is None:
+            raise ValueError("空值无法转换为 year-month 浮点标签。")
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            return float(value)
+        text = str(value).strip()
+        if not text:
+            raise ValueError("空字符串无法转换为 year-month 浮点标签。")
+        match = re.fullmatch(r"(-?\d+)[-_/](\d{1,2})", text)
+        if match is None:
+            raise ValueError("字符串不符合 year-month 模式。")
+        year = int(match.group(1))
+        month = int(match.group(2))
+        if month < 1 or month > 12:
+            raise ValueError("月份应在 1 到 12 之间。")
+        month_component = month / 100.0
+        value = year + month_component if year >= 0 else year - month_component
+        return float(f"{value:.2f}")
+
+    @classmethod
+    def _convert_object_column(cls, column: np.ndarray) -> tuple[bool, np.ndarray]:
+        try:
+            numeric = np.asarray(column, dtype=float)
+            return True, numeric.reshape(-1, 1)
+        except (TypeError, ValueError):
+            pass
+        try:
+            parsed = np.array([cls._parse_year_month_label(v) for v in column], dtype=float)
+            return True, parsed.reshape(-1, 1)
+        except ValueError:
+            return False, np.empty((column.shape[0], 0), dtype=float)
+
+    def _categorical_mask(self, arr_obj: np.ndarray, categorical_values) -> np.ndarray:
+        mask = np.zeros(arr_obj.shape[1], dtype=bool)
+        if categorical_values is None:
+            return mask
+        cat_arr, _ = self._prepare_categorical(categorical_values)
+        if cat_arr is None or cat_arr.size == 0:
+            return mask
+        arr_str = arr_obj.astype(str)
+        cat_arr_str = cat_arr.astype(str)
+        for j in range(cat_arr_str.shape[1]):
+            cat_col = cat_arr_str[:, j]
+            matches = np.all(arr_str == cat_col[:, None], axis=0)
+            mask |= matches
+        return mask
+
+    def _select_numeric_object_columns(
+        self, arr_obj: np.ndarray, categorical_values
+    ) -> tuple[list[int], list[np.ndarray]]:
+        mask = self._categorical_mask(arr_obj, categorical_values)
+        numeric_indices: list[int] = []
+        numeric_parts: list[np.ndarray] = []
+        for idx in range(arr_obj.shape[1]):
+            if mask[idx]:
+                continue
+            success, converted = self._convert_object_column(arr_obj[:, idx])
+            if success:
+                numeric_indices.append(idx)
+                numeric_parts.append(converted)
+        return numeric_indices, numeric_parts
+
+    @staticmethod
     def _is_pandas_frame(obj) -> bool:
         """Best-effort detection for pandas-like DataFrame objects."""
 
@@ -173,48 +245,46 @@ class GWBProbEstimator:
             ) from exc
 
     def _extract_numeric_from_object_array(self, arr, categorical_values, fit: bool) -> np.ndarray:
-        if categorical_values is None and (not fit and self._numeric_indices is None):
-            raise ValueError(
-                "检测到混合类型特征，但缺少类别列信息，无法自动移除。"
-            )
+        arr_obj = np.asarray(arr, dtype=object)
+        if arr_obj.ndim != 2:
+            arr_obj = arr_obj.reshape(arr_obj.shape[0], -1)
 
         if fit:
-            inferred_indices = self._infer_numeric_indices(arr, categorical_values)
-            self._numeric_indices = inferred_indices
-        else:
-            if self._numeric_indices is None:
-                inferred_indices = self._infer_numeric_indices(arr, categorical_values)
-                self._numeric_indices = inferred_indices
-            inferred_indices = self._numeric_indices
+            numeric_indices, numeric_parts = self._select_numeric_object_columns(arr_obj, categorical_values)
+            if not numeric_indices:
+                raise ValueError("在输入矩阵中未找到可转换的数值特征列，请检查输入数据。")
+            self._numeric_indices = np.asarray(numeric_indices, dtype=int)
+            return self._build_numeric_matrix(numeric_parts)
 
-        if inferred_indices.size == 0:
-            raise ValueError("GWBProbEstimator 需要至少一个数值特征列用于距离计算。")
-        sub_arr = arr[:, inferred_indices]
-        return np.asarray(sub_arr, float)
+        if self._numeric_indices is None:
+            numeric_indices, numeric_parts = self._select_numeric_object_columns(arr_obj, categorical_values)
+            if not numeric_indices:
+                raise ValueError("在输入矩阵中未找到可转换的数值特征列，请检查输入数据。")
+            self._numeric_indices = np.asarray(numeric_indices, dtype=int)
+            return self._build_numeric_matrix(numeric_parts)
+
+        if np.any(self._numeric_indices >= arr_obj.shape[1]):
+            raise ValueError(
+                "输入特征维度与拟合阶段不一致：期望至少 %d 列，得到 %d"
+                % (int(self._numeric_indices.max()) + 1, arr_obj.shape[1])
+            )
+
+        numeric_parts: list[np.ndarray] = []
+        for idx in self._numeric_indices:
+            success, converted = self._convert_object_column(arr_obj[:, idx])
+            if not success:
+                raise ValueError(
+                    "检测到非数值特征列，请确认输入与拟合阶段一致（列索引=%d）。" % int(idx)
+                )
+            numeric_parts.append(converted)
+        return self._build_numeric_matrix(numeric_parts)
 
     def _infer_numeric_indices(self, arr, categorical_values) -> np.ndarray:
-        if categorical_values is None:
-            raise ValueError(
-                "检测到混合类型特征，但未提供 categorical_values 以定位类别列。"
-            )
-        cat_arr, _ = self._prepare_categorical(categorical_values)
-        if cat_arr is None or cat_arr.size == 0:
-            raise ValueError(
-                "categorical_values 为空，无法从混合特征矩阵中推断数值列。"
-            )
-        cat_as_str = np.asarray(cat_arr, dtype=str)
-        arr_as_str = np.asarray(arr, dtype=str)
-        drop_mask = np.zeros(arr_as_str.shape[1], dtype=bool)
-        for j in range(cat_as_str.shape[1]):
-            cat_col = cat_as_str[:, j]
-            matches = np.all(arr_as_str == cat_col[:, None], axis=0)
-            drop_mask |= matches
-        keep_indices = np.flatnonzero(~drop_mask)
-        if keep_indices.size == 0:
-            raise ValueError(
-                "在输入矩阵中未找到数值特征列，请确认 categorical_values 是否正确。"
-            )
-        return keep_indices
+        arr_obj = np.asarray(arr, dtype=object)
+        numeric_indices, _ = self._select_numeric_object_columns(arr_obj, categorical_values)
+        if not numeric_indices:
+            raise ValueError("在输入矩阵中未找到可转换的数值特征列，请检查输入数据。")
+        return np.asarray(numeric_indices, dtype=int)
 
     @staticmethod
     def _normalize_categories(values: np.ndarray) -> np.ndarray:
