@@ -100,6 +100,7 @@ class GWBProbEstimator:
         self._cat_cols: list[str] = []
         self._numeric_columns: list[str] | None = None
         self._n_features: int | None = None
+        self._numeric_indices: np.ndarray | None = None
 
     @staticmethod
     def _is_pandas_frame(obj) -> bool:
@@ -107,7 +108,7 @@ class GWBProbEstimator:
 
         return hasattr(obj, "select_dtypes") and hasattr(obj, "columns")
 
-    def _ensure_numeric_matrix(self, X, *, fit: bool) -> np.ndarray:
+    def _ensure_numeric_matrix(self, X, *, fit: bool, categorical_values=None) -> np.ndarray:
         """Extract the numeric feature matrix while filtering categorical columns."""
 
         if self._is_pandas_frame(X):
@@ -120,6 +121,7 @@ class GWBProbEstimator:
             numeric_df = df.select_dtypes(include=["number", "bool"])
             if fit:
                 self._numeric_columns = list(numeric_df.columns)
+                self._numeric_indices = None
             elif self._numeric_columns is not None:
                 missing = [col for col in self._numeric_columns if col not in numeric_df.columns]
                 if missing:
@@ -137,20 +139,82 @@ class GWBProbEstimator:
                 )
             return arr
 
+        arr = np.asarray(X)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        if fit:
+            self._numeric_columns = None
+
+        if arr.dtype.kind in ("O", "U", "S"):
+            arr = self._extract_numeric_from_object_array(arr, categorical_values, fit)
+        else:
+            arr = np.asarray(arr, float)
+            if fit:
+                self._numeric_indices = np.arange(arr.shape[1], dtype=int)
+            elif self._numeric_indices is not None and arr.shape[1] != len(self._numeric_indices):
+                try:
+                    arr = arr[:, self._numeric_indices]
+                except Exception as exc:  # pragma: no cover - defensive
+                    raise ValueError(
+                        "输入特征维度与拟合阶段不一致：期望 %d，得到 %d"
+                        % (len(self._numeric_indices), arr.shape[1])
+                    ) from exc
+
+        if self._n_features is not None and not fit and arr.shape[1] != self._n_features:
+            raise ValueError(
+                "数值特征维度与拟合阶段不一致：期望 %d，得到 %d" % (self._n_features, arr.shape[1])
+            )
         try:
-            arr = np.asarray(X, float)
+            return np.asarray(arr, float)
         except ValueError as exc:
             raise ValueError(
                 "GWBProbEstimator 仅支持数值特征，请在调用前移除或编码类别列。原始错误: %s"
                 % exc
             ) from exc
-        if fit:
-            self._numeric_columns = None
-        if self._n_features is not None and not fit and arr.shape[1] != self._n_features:
+
+    def _extract_numeric_from_object_array(self, arr, categorical_values, fit: bool) -> np.ndarray:
+        if categorical_values is None and (not fit and self._numeric_indices is None):
             raise ValueError(
-                "数值特征维度与拟合阶段不一致：期望 %d，得到 %d" % (self._n_features, arr.shape[1])
+                "检测到混合类型特征，但缺少类别列信息，无法自动移除。"
             )
-        return arr
+
+        if fit:
+            inferred_indices = self._infer_numeric_indices(arr, categorical_values)
+            self._numeric_indices = inferred_indices
+        else:
+            if self._numeric_indices is None:
+                inferred_indices = self._infer_numeric_indices(arr, categorical_values)
+                self._numeric_indices = inferred_indices
+            inferred_indices = self._numeric_indices
+
+        if inferred_indices.size == 0:
+            raise ValueError("GWBProbEstimator 需要至少一个数值特征列用于距离计算。")
+        sub_arr = arr[:, inferred_indices]
+        return np.asarray(sub_arr, float)
+
+    def _infer_numeric_indices(self, arr, categorical_values) -> np.ndarray:
+        if categorical_values is None:
+            raise ValueError(
+                "检测到混合类型特征，但未提供 categorical_values 以定位类别列。"
+            )
+        cat_arr, _ = self._prepare_categorical(categorical_values)
+        if cat_arr is None or cat_arr.size == 0:
+            raise ValueError(
+                "categorical_values 为空，无法从混合特征矩阵中推断数值列。"
+            )
+        cat_as_str = np.asarray(cat_arr, dtype=str)
+        arr_as_str = np.asarray(arr, dtype=str)
+        drop_mask = np.zeros(arr_as_str.shape[1], dtype=bool)
+        for j in range(cat_as_str.shape[1]):
+            cat_col = cat_as_str[:, j]
+            matches = np.all(arr_as_str == cat_col[:, None], axis=0)
+            drop_mask |= matches
+        keep_indices = np.flatnonzero(~drop_mask)
+        if keep_indices.size == 0:
+            raise ValueError(
+                "在输入矩阵中未找到数值特征列，请确认 categorical_values 是否正确。"
+            )
+        return keep_indices
 
     @staticmethod
     def _normalize_categories(values: np.ndarray) -> np.ndarray:
@@ -215,7 +279,7 @@ class GWBProbEstimator:
     def fit(self, X, y, categorical_values=None):
         self._numeric_columns = None
         self._n_features = None
-        X = self._ensure_numeric_matrix(X, fit=True)
+        X = self._ensure_numeric_matrix(X, fit=True, categorical_values=categorical_values)
         y = np.asarray(y, int)
         n_samples = X.shape[0]
         self._n_features = X.shape[1]
@@ -306,7 +370,7 @@ class GWBProbEstimator:
         if self.y_tr is None or self._k_effective is None:
             raise RuntimeError("Estimator must be fitted before calling predict_proba().")
 
-        X = self._ensure_numeric_matrix(X, fit=False)
+        X = self._ensure_numeric_matrix(X, fit=False, categorical_values=categorical_values)
         if self._use_faiss_runtime:
             if self._faiss_index is None:
                 raise RuntimeError("FAISS 索引未正确初始化。")
