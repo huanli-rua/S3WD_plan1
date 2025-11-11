@@ -270,12 +270,33 @@ def _compute_similarity_block(
     return E_pos, E_neg
 
 
-def _ensure_year_month(X: pd.DataFrame) -> pd.DataFrame:
-    if "Year" not in X.columns or "Month" not in X.columns:
-        raise ValueError("数据集缺少 Year / Month 列，无法按 year-month 窗口前滚。")
+def _ensure_year_month(X: pd.DataFrame, start_year: Optional[int] = None) -> pd.DataFrame:
+    if "Month" not in X.columns:
+        raise ValueError("数据集缺少 Month 列，无法按 year-month 窗口前滚。")
     X = X.copy()
-    X["Year"] = X["Year"].astype(int)
     X["Month"] = X["Month"].astype(int)
+    if "Year" not in X.columns:
+        if start_year is None:
+            raise ValueError("数据集缺少 Year 列，且未提供 start_year 生成合成年份。")
+        months = X["Month"].to_numpy(dtype=int)
+        if months.size == 0:
+            raise ValueError("数据集为空，无法构造合成年份。")
+        base_year = int(start_year)
+        year_values: List[int] = []
+        year_offset = 0
+        prev_month = int(months[0])
+        for idx, month in enumerate(months):
+            month_int = int(month)
+            if idx > 0 and month_int < prev_month:
+                year_offset += 1
+            prev_month = month_int
+            year_values.append(base_year + year_offset)
+        X["Year"] = year_values
+        X["Year_synth"] = year_values
+    else:
+        X["Year"] = X["Year"].astype(int)
+        if "Year_synth" in X.columns:
+            X["Year_synth"] = X["Year_synth"].astype(int)
     X["period"] = pd.PeriodIndex(year=X["Year"], month=X["Month"], freq="M")
     X.sort_values(["period"], inplace=True)
     X.reset_index(drop=True, inplace=True)
@@ -382,6 +403,11 @@ def run_streaming_flow(
     data_dir = Path(cfg["DATA"]["data_dir"]).resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
 
+    start_year_cfg = cfg["DATA"].get("start_year")
+    if start_year_cfg is None:
+        start_year_cfg = 1987
+    start_year_cfg = int(start_year_cfg)
+
     time_cfg = cfg.get("TIME", {}) or {}
     split_mode = str(time_cfg.get("split", "year_month"))
     if split_mode != "year_month":
@@ -406,7 +432,19 @@ def run_streaming_flow(
         threshold_op=cfg["DATA"].get("threshold_op"),
     )
     X_enriched = augment_airline_features(X_raw)
-    X_enriched = _ensure_year_month(X_enriched)
+    X_enriched = _ensure_year_month(X_enriched, start_year=start_year_cfg)
+    categorical_candidates = [
+        c for c in ["UniqueCarrier", "Origin", "Dest", "DayOfWeek", "Month"] if c in X_enriched.columns
+    ]
+    categorical_set = set(categorical_candidates)
+    numeric_cols = [
+        col
+        for col in X_enriched.columns
+        if pd.api.types.is_numeric_dtype(X_enriched[col]) and col not in categorical_set
+    ]
+    if not numeric_cols:
+        raise ValueError("数据集中缺少可用于 GWB 估计的数值特征列。")
+    X_numeric = X_enriched[numeric_cols]
 
     warmup_periods, stream_periods = _prepare_windows(X_enriched, warmup_span)
     warmup_labels = [_period_to_str(p) for p in warmup_periods]
@@ -423,10 +461,11 @@ def run_streaming_flow(
 
     warmup_mask = X_enriched["period"].isin(warmup_periods)
     X_warm = X_enriched.loc[warmup_mask].reset_index(drop=True)
+    X_warm_num = X_numeric.loc[warmup_mask].reset_index(drop=True)
     y_warm = y.loc[warmup_mask].reset_index(drop=True)
     buckets_warm = assign_buckets(X_warm)
 
-    cat_cols = [c for c in ["UniqueCarrier", "Origin", "Dest", "DayOfWeek", "Month"] if c in X_warm.columns]
+    cat_cols = list(categorical_candidates)
 
     gwb_cfg = cfg["GWB"]
     gwb_estimator = GWBProbEstimator(
@@ -442,7 +481,7 @@ def run_streaming_flow(
         category_penalty=gwb_cfg.get("category_penalty", 0.3),
     )
     gwb_estimator.fit(
-        X_warm.values,
+        X_warm_num.values,
         y_warm.to_numpy(),
         categorical_values=X_warm[cat_cols] if cat_cols else None,
     )
@@ -451,7 +490,7 @@ def run_streaming_flow(
     gwb_prob_warm = None
     if use_gwb_weight:
         gwb_prob_warm = gwb_estimator.predict_proba(
-            X_warm.values,
+            X_warm_num.values,
             categorical_values=X_warm[cat_cols] if cat_cols else None,
         )
 
@@ -574,7 +613,7 @@ def run_streaming_flow(
     drift_events: List[Dict[str, object]] = []
     prediction_records: List[Dict[str, object]] = []
 
-    for period in stream_periods:
+    for seq_idx, period in enumerate(stream_periods, start=1):
         unlockeds = reservoir.unlock_until(period)
         if unlockeds:
             keep_summary = {
@@ -644,7 +683,7 @@ def run_streaming_flow(
                 sim_params=runtime_state,
             )
             P_block = to_trisect_probs(E_pos, E_neg)
-            alpha_star, beta_star, grid_score = select_alpha_beta(
+            alpha_star, beta_star, grid_info = select_alpha_beta(
                 P_block,
                 measure_grid,
                 runtime_state["constraints"],
@@ -750,7 +789,7 @@ def run_streaming_flow(
                 "beta_star": beta_star,
                 "alpha_smooth": alpha_smooth,
                 "beta_smooth": beta_smooth,
-                "grid_score": grid_score,
+                "grid_info": grid_info,
                 "positive": positive,
                 "negative": negative,
                 "boundary": boundary,
@@ -760,6 +799,10 @@ def run_streaming_flow(
                 "perf_drop": perf_drop,
                 "constraint_resolution": constraint_resolution,
                 "constraint_note": constraint_note,
+                "E_pos": E_pos,
+                "E_neg": E_neg,
+                "alpha_cap": alpha_cap,
+                "beta_cap": beta_cap,
             }
             return positive, boundary, stats
 
@@ -771,28 +814,6 @@ def run_streaming_flow(
         posrate_curr = float(y_block.mean())
         posrate_gap = abs(posrate_curr - baseline_info["posrate"])
 
-        _logger.info(
-            "【窗口】year-month=%s；样本数=%d",
-            _period_to_str(period),
-            len(X_block),
-        )
-        delta_alpha = float("nan") if alpha_prev is None else abs(stats["alpha_smooth"] - alpha_prev)
-        delta_beta = float("nan") if beta_prev is None else abs(stats["beta_smooth"] - beta_prev)
-        _logger.info(
-            "【阈值】alpha*=%0.3f,beta*=%0.3f → α_t=%0.3f/β_t=%0.3f；Δα=%0.3f；Δβ=%0.3f；BND占比=%0.3f；POS覆盖=%0.3f；objective=%s；score=%0.4f；σ=%0.3f；约束=%s",
-            stats["alpha_star"],
-            stats["beta_star"],
-            stats["alpha_smooth"],
-            stats["beta_smooth"],
-            delta_alpha,
-            delta_beta,
-            stats["bnd_ratio"],
-            stats["pos_cov"],
-            objective,
-            stats["score"],
-            float(runtime_state.get("sigma", 0.0)),
-            stats.get("constraint_note") or stats.get("constraint_resolution"),
-        )
 
         stats_curr = {
             "window_id": int(f"{period.year}{period.month:02d}"),
@@ -830,19 +851,117 @@ def run_streaming_flow(
                 canonical_actions.append("紧护栏")
                 canonical_actions.append("重建GWB")
             canonical_label = "、".join(canonical_actions) if canonical_actions else "观察"
-            _logger.info(
-                "【漂移】级别=%s；动作=%s；生效范围=ref/next（当月评估保持当前样本）",
-                drift_level,
-                canonical_label,
-            )
 
         if runtime_state.get("redo_threshold"):
             _, _, stats = _recompute(float(runtime_state.get("sigma", stats["alpha_smooth"])))
             runtime_state["redo_threshold"] = False
 
+        grid_info = stats.get("grid_info", {})
+        window_index = len(warmup_periods) + seq_idx
+        period_label = _period_to_str(period)
+        sample_count = len(X_block)
+        month_value = int(period.month)
+        year_label = "Year_synth" if "Year_synth" in X_block.columns else "Year"
+        year_value = int(X_block[year_label].iloc[0])
+        gamma_total = sum(len(bucket.get("pos", [])) for bucket in ref_tuples.values())
+        psi_total = sum(len(bucket.get("neg", [])) for bucket in ref_tuples.values())
+        same_windows = detail.get("same_month_windows") or []
+        same_windows_str = "、".join(same_windows) if same_windows else "无"
+        E_pos_arr = np.asarray(stats.get("E_pos"), dtype=float)
+        E_neg_arr = np.asarray(stats.get("E_neg"), dtype=float)
+        mean_E_pos = float(np.nanmean(E_pos_arr)) if E_pos_arr.size else float("nan")
+        mean_E_neg = float(np.nanmean(E_neg_arr)) if E_neg_arr.size else float("nan")
+        corr_diff = float(np.nanmean(E_pos_arr - E_neg_arr)) if E_pos_arr.size else float("nan")
+        P_block = stats["P_block"]
+        mean_p_pos = float(np.nanmean(P_block["p_pos"])) if len(P_block["p_pos"]) else float("nan")
+        mean_p_bnd = float(np.nanmean(P_block["p_bnd"])) if len(P_block["p_bnd"]) else float("nan")
+        mean_p_neg = float(np.nanmean(P_block["p_neg"])) if len(P_block["p_neg"]) else float("nan")
+        feasible_count = int(grid_info.get("feasible_count", 0))
+        best_score = float(grid_info.get("best_score", float("nan")))
+        second_score = float(grid_info.get("second_score", float("nan")))
+        grid_delta = float(grid_info.get("delta", float("nan")))
+        alpha_grid_str = f"[{alpha_range_cfg[0]:.2f},{alpha_range_cfg[1]:.2f},{alpha_range_cfg[2]:.2f}]"
+        beta_grid_str = f"[{beta_range_cfg[0]:.2f},{beta_range_cfg[1]:.2f},{beta_range_cfg[2]:.2f}]"
+        delta_alpha = (
+            float("nan") if alpha_prev is None else abs(stats["alpha_smooth"] - alpha_prev)
+        )
+        delta_beta = (
+            float("nan") if beta_prev is None else abs(stats["beta_smooth"] - beta_prev)
+        )
+        step_cap_str = f"{{'alpha':{stats['alpha_cap']:.3f},'beta':{stats['beta_cap']:.3f}}}"
+        action_summary = ""
+        if drift_level != "NONE":
+            action_summary = canonical_label or ("、".join(actions_taken) if actions_taken else "观察")
+        elif actions_taken:
+            action_summary = "、".join(actions_taken)
+        else:
+            action_summary = "无"
+
+        _logger.info(
+            "【数据切片】win=%d(%s) 样本数=%d，Month=%02d，%s=%d",
+            window_index,
+            period_label,
+            sample_count,
+            month_value,
+            year_label,
+            year_value,
+        )
+        _logger.info(
+            "【示范库】Γ数=%d，Ψ数=%d，历史同月来源窗口=%s",
+            gamma_total,
+            psi_total,
+            same_windows_str,
+        )
+        _logger.info(
+            "【相关度摘要】mean(E_pos)=%.4f，mean(E_neg)=%.4f，corr_diff=%.4f",
+            mean_E_pos,
+            mean_E_neg,
+            corr_diff,
+        )
+        _logger.info(
+            "【三域概率摘要】mean(p_pos)=%.4f，mean(p_bnd)=%.4f，mean(p_neg)=%.4f",
+            mean_p_pos,
+            mean_p_bnd,
+            mean_p_neg,
+        )
+        _logger.info(
+            "【网格信息】alpha网格=%s，beta网格=%s，可行格数=%d",
+            alpha_grid_str,
+            beta_grid_str,
+            feasible_count,
+        )
+        _logger.info(
+            "【目标面】best_score=%.4f，次优_score=%.4f，Δ=%.4f",
+            best_score,
+            second_score,
+            grid_delta,
+        )
+        drift_msg = (
+            f"【漂移判级】PSI={psi_val:.4f}，TV={tv_val:.4f}，PosRateΔ={posrate_gap:.4f}，等级={drift_level}"
+        )
+        drift_msg += f"，动作={action_summary}"
+        _logger.info(drift_msg)
+        _logger.info(
+            "【重选后】α*=%.3f，β*=%.3f，EMA后=α=%.3f/β=%.3f，Δα=%.3f，Δβ=%.3f，ema=%.3f，step_cap=%s，BND占比=%.3f，目标=%.4f(%s)",
+            stats["alpha_star"],
+            stats["beta_star"],
+            stats["alpha_smooth"],
+            stats["beta_smooth"],
+            delta_alpha,
+            delta_beta,
+            float(ema_alpha_coeff),
+            step_cap_str,
+            stats["bnd_ratio"],
+            stats["score"],
+            objective,
+        )
+
         threshold_trace.append(
             {
                 "window": _period_to_str(period),
+                "window_index": len(warmup_periods) + seq_idx,
+                "year": int(period.year),
+                "month": int(period.month),
                 "alpha_star": float(stats["alpha_star"]),
                 "beta_star": float(stats["beta_star"]),
                 "alpha_smoothed": float(stats["alpha_smooth"]),
@@ -852,6 +971,10 @@ def run_streaming_flow(
                 "pos_coverage": float(stats["pos_cov"]),
                 "constraint_note": stats.get("constraint_note", ""),
                 "constraint_resolution": stats.get("constraint_resolution", ""),
+                "grid_best_score": float(grid_info.get("best_score", float("nan"))),
+                "grid_second_score": float(grid_info.get("second_score", float("nan"))),
+                "grid_delta": float(grid_info.get("delta", float("nan"))),
+                "grid_feasible": int(grid_info.get("feasible_count", 0)),
             }
         )
 
@@ -898,7 +1021,7 @@ def run_streaming_flow(
 
         if use_gwb_weight:
             record.gwb_prob = gwb_estimator.predict_proba(
-                X_block.values,
+                X_block[numeric_cols].values,
                 categorical_values=X_block[cat_cols] if cat_cols else None,
             )
 
@@ -906,15 +1029,16 @@ def run_streaming_flow(
         if runtime_state.get("rebuild_gwb_index") and use_gwb_weight:
             if reservoir.global_history:
                 hist_X = pd.concat([rec.X for rec in reservoir.global_history], ignore_index=True)
+                hist_X_num = hist_X[numeric_cols]
                 hist_y = np.concatenate([rec.y for rec in reservoir.global_history])
                 gwb_estimator.fit(
-                    hist_X.values,
+                    hist_X_num.values,
                     hist_y,
                     categorical_values=hist_X[cat_cols] if cat_cols else None,
                 )
                 for rec in reservoir.global_history:
                     rec.gwb_prob = gwb_estimator.predict_proba(
-                        rec.X.values,
+                        rec.X[numeric_cols].values,
                         categorical_values=rec.X[cat_cols] if cat_cols else None,
                     )
             runtime_state["rebuild_gwb_index"] = False
