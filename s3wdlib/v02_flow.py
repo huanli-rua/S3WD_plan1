@@ -35,6 +35,40 @@ if not _logger.handlers:
 _logger.setLevel(logging.INFO)
 
 
+_PERIOD_LABEL_BASE_YEAR: int | None = None
+
+
+def _set_period_label_base(year: int) -> None:
+    """Set the reference year for window labels."""
+
+    global _PERIOD_LABEL_BASE_YEAR
+    _PERIOD_LABEL_BASE_YEAR = int(year)
+
+
+def year_month_to_float(year: int, month: int, base_year: int | None = None) -> float:
+    """Encode a year-month pair into the requested float representation."""
+
+    if month < 1 or month > 12:
+        raise ValueError("Month value must be in [1, 12] for window labels.")
+    if base_year is None:
+        base_year = _PERIOD_LABEL_BASE_YEAR
+    if base_year is None:
+        base_year = year
+    year_offset = int(year) - int(base_year)
+    month_component = int(month) / 100.0
+    if year_offset >= 0:
+        label_value = year_offset + month_component
+    else:
+        label_value = year_offset - month_component
+    return float(f"{label_value:.2f}")
+
+
+def format_window_label(value: float) -> str:
+    """Format window label floats with two decimal places."""
+
+    return f"{value:.2f}"
+
+
 @dataclass
 class WindowRecord:
     """缓存单个窗口的特征/标签/预测，用于季节桶增量。"""
@@ -297,6 +331,8 @@ def _ensure_year_month(X: pd.DataFrame, start_year: Optional[int] = None) -> pd.
         X["Year"] = X["Year"].astype(int)
         if "Year_synth" in X.columns:
             X["Year_synth"] = X["Year_synth"].astype(int)
+    min_year = int(X["Year"].min())
+    _set_period_label_base(min_year)
     X["period"] = pd.PeriodIndex(year=X["Year"], month=X["Month"], freq="M")
     X.sort_values(["period"], inplace=True)
     X.reset_index(drop=True, inplace=True)
@@ -314,8 +350,8 @@ def _prepare_windows(X: pd.DataFrame, warmup_windows: int) -> Tuple[List[pd.Peri
     return warmup, stream
 
 
-def _period_to_str(period: pd.Period) -> str:
-    return f"{period.year:04d}-{period.month:02d}"
+def _period_to_str(period: pd.Period) -> float:
+    return year_month_to_float(int(period.year), int(period.month))
 
 
 def _build_figures(metrics_by_year: pd.DataFrame, output_dir: Path) -> None:
@@ -449,13 +485,15 @@ def run_streaming_flow(
     warmup_periods, stream_periods = _prepare_windows(X_enriched, warmup_span)
     warmup_labels = [_period_to_str(p) for p in warmup_periods]
     stream_labels = [_period_to_str(p) for p in stream_periods]
+    warmup_labels_fmt = [format_window_label(val) for val in warmup_labels]
+    stream_labels_fmt = [format_window_label(val) for val in stream_labels]
     if not stream_periods:
         raise RuntimeError("流式窗口不足，请调整 FLOW.warmup_windows。")
 
     _logger.info(
         "【初始化】warmup=%s，stream=%s，总窗口=%d",
-        warmup_labels,
-        stream_labels,
+        warmup_labels_fmt,
+        stream_labels_fmt,
         len(warmup_periods) + len(stream_periods),
     )
 
@@ -625,7 +663,7 @@ def run_streaming_flow(
             neg_samples = total_samples - pos_samples
             _logger.info(
                 "【增量】解锁标签月=%s；合入季节桶=%s；keep_history_ratio=%.2f/容量=%d；类均衡(POS/NEG)=%d/%d",
-                ",".join(keep_summary["窗口"]),
+                ",".join(format_window_label(w) for w in keep_summary["窗口"]),
                 len(reservoir.global_history),
                 reservoir.keep_history_ratio,
                 reservoir.history_cap,
@@ -635,7 +673,10 @@ def run_streaming_flow(
 
         seasonal_samples = reservoir.gather(period)
         if seasonal_samples is None or len(seasonal_samples.X) == 0:
-            _logger.warning("窗口 %s 缺少历史示范，跳过。", _period_to_str(period))
+            _logger.warning(
+                "窗口 %s 缺少历史示范，跳过。",
+                format_window_label(_period_to_str(period)),
+            )
             continue
 
         detail = seasonal_samples.source_detail or {}
@@ -646,11 +687,11 @@ def run_streaming_flow(
         neighbor_samples = detail.get("neighbor_samples", 0)
         _logger.info(
             "【参考库】year-month=%s；同月历史窗口=%s（年份=%s，样本=%d）；邻近窗口=%s（样本=%d）；历史仅用于构建Γ/Ψ候选，不混入当月评估",
-            _period_to_str(period),
-            "、".join(same_windows) if same_windows else "无",
+            format_window_label(_period_to_str(period)),
+            "、".join(format_window_label(w) for w in same_windows) if same_windows else "无",
             "、".join(str(y) for y in same_years) if same_years else "无",
             same_samples,
-            "、".join(neighbor_windows) if neighbor_windows else "无",
+            "、".join(format_window_label(w) for w in neighbor_windows) if neighbor_windows else "无",
             neighbor_samples,
         )
 
@@ -859,6 +900,7 @@ def run_streaming_flow(
         grid_info = stats.get("grid_info", {})
         window_index = len(warmup_periods) + seq_idx
         period_label = _period_to_str(period)
+        period_label_str = format_window_label(period_label)
         sample_count = len(X_block)
         month_value = int(period.month)
         year_label = "Year_synth" if "Year_synth" in X_block.columns else "Year"
@@ -866,7 +908,9 @@ def run_streaming_flow(
         gamma_total = sum(len(bucket.get("pos", [])) for bucket in ref_tuples.values())
         psi_total = sum(len(bucket.get("neg", [])) for bucket in ref_tuples.values())
         same_windows = detail.get("same_month_windows") or []
-        same_windows_str = "、".join(same_windows) if same_windows else "无"
+        same_windows_str = (
+            "、".join(format_window_label(w) for w in same_windows) if same_windows else "无"
+        )
         E_pos_arr = np.asarray(stats.get("E_pos"), dtype=float)
         E_neg_arr = np.asarray(stats.get("E_neg"), dtype=float)
         mean_E_pos = float(np.nanmean(E_pos_arr)) if E_pos_arr.size else float("nan")
@@ -900,7 +944,7 @@ def run_streaming_flow(
         _logger.info(
             "【数据切片】win=%d(%s) 样本数=%d，Month=%02d，%s=%d",
             window_index,
-            period_label,
+            period_label_str,
             sample_count,
             month_value,
             year_label,
@@ -958,7 +1002,7 @@ def run_streaming_flow(
 
         threshold_trace.append(
             {
-                "window": _period_to_str(period),
+                "window": period_label,
                 "window_index": len(warmup_periods) + seq_idx,
                 "year": int(period.year),
                 "month": int(period.month),
@@ -988,7 +1032,7 @@ def run_streaming_flow(
             {
                 "year": int(period.year),
                 "month": int(period.month),
-                "window": _period_to_str(period),
+                "window": period_label,
                 "n_samples": int(len(X_block)),
                 "Precision": precision,
                 "Recall": recall,
@@ -1049,7 +1093,7 @@ def run_streaming_flow(
         if drift_level != "NONE":
             drift_events.append(
                 {
-                    "window": _period_to_str(period),
+                    "window": period_label,
                     "level": drift_level,
                     "psi": float(psi_val),
                     "tv": float(tv_val),
