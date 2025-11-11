@@ -21,6 +21,7 @@ from .batch_measure import to_trisect_probs, expected_cost, expected_fbeta, comp
 from .threshold_selector import select_alpha_beta
 from .smoothing import ema_clip
 from .drift_controller import detect_drift, apply_actions
+from .v02_flow import run_streaming_flow
 
 __all__ = [
     "load_table_auto",
@@ -56,4 +57,5 @@ __all__ = [
     "ema_clip",
     "detect_drift",
     "apply_actions",
+    "run_streaming_flow",
 ]

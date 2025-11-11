@@ -91,12 +91,16 @@ def build_ref_tuples(
     pos_quantile: float,
     keep_history_ratio: float = 0.3,
     gwb_prob: np.ndarray | None = None,
+    sample_weight: np.ndarray | None = None,
+    weight_clip: float | None = None,
 ) -> Dict[str, dict]:
     """
     在每个桶内构建参考元组：
     - Γ_pos：y=1 且延误强度/置信度高的前 topk_per_class
     - Ψ_neg：y=0 且延误为负或很小的前 topk_per_class
-    - gwb_prob（可选）：作为权重，提升典型性（无则权重=1）
+    - gwb_prob（可选）：作为置信度权重
+    - sample_weight（可选）：统一的样本重要性权重（结合时间/季节/漂移/置信）
+    - weight_clip（可选）：截断样本权重的上限
     返回：dict[bucket_id] -> {'pos': list[RefItem], 'neg': list[RefItem]}
     RefItem = {'num_vec': np.ndarray, 'cat_fields': dict, 'weight': float}
     """
@@ -107,7 +111,25 @@ def build_ref_tuples(
         raise ValueError("buckets 长度必须与 X 对齐。")
 
     y_arr = np.asarray(y, dtype=int)
-    weight = np.asarray(gwb_prob, dtype=float) if gwb_prob is not None else np.ones_like(y_arr, dtype=float)
+    prob = (
+        np.asarray(gwb_prob, dtype=float).reshape(-1)
+        if gwb_prob is not None
+        else np.full(len(X), 0.5, dtype=float)
+    )
+    base_weight = (
+        np.asarray(sample_weight, dtype=float).reshape(-1)
+        if sample_weight is not None
+        else np.ones(len(X), dtype=float)
+    )
+    if base_weight.size != len(X):
+        raise ValueError("sample_weight 长度必须与 X 行数一致。")
+    if weight_clip is not None and weight_clip > 0:
+        base_weight = np.clip(base_weight, 1e-6, float(weight_clip))
+    else:
+        base_weight = np.clip(base_weight, 1e-6, None)
+
+    pos_score = base_weight * np.clip(prob, 1e-6, None)
+    neg_score = base_weight * np.clip(1.0 - prob, 1e-6, None)
 
     num_cols = [c for c in ["dep_hour", "arr_hour", "block_time_min", "Distance"] if c in X.columns]
     X_num, stats = _prepare_numeric(X, num_cols)
@@ -131,26 +153,26 @@ def build_ref_tuples(
         bucket_refs = {"pos": [], "neg": []}
 
         if pos_idx.size:
-            pos_scores = weight[pos_idx]
+            pos_scores = pos_score[pos_idx]
             selected = _select_top_indices(pos_scores, topk_per_class, pos_quantile, reverse=True)
             for order_idx in pos_idx[selected]:
                 bucket_refs["pos"].append(
                     RefItem(
                         num_vec=X_num.iloc[order_idx].to_numpy(dtype=float) if num_cols else np.asarray([], dtype=float),
                         cat_fields={col: str(cat_frame.iloc[order_idx][col]) for col in cat_cols},
-                        weight=float(weight[order_idx]),
+                        weight=float(base_weight[order_idx]),
                     )
                 )
 
         if neg_idx.size:
-            neg_scores = 1.0 - weight[neg_idx]
+            neg_scores = neg_score[neg_idx]
             selected_neg = _select_top_indices(neg_scores, topk_per_class, 1 - pos_quantile, reverse=True)
             for order_idx in neg_idx[selected_neg]:
                 bucket_refs["neg"].append(
                     RefItem(
                         num_vec=X_num.iloc[order_idx].to_numpy(dtype=float) if num_cols else np.asarray([], dtype=float),
                         cat_fields={col: str(cat_frame.iloc[order_idx][col]) for col in cat_cols},
-                        weight=float(weight[order_idx]),
+                        weight=float(base_weight[order_idx]),
                     )
                 )
 

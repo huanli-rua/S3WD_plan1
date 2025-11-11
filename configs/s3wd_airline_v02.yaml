@@ -109,3 +109,12 @@ DRIFT:
 SWITCH:
   enable_ref_tuple: true
   enable_pso: false
+
+FLOW:
+  warmup_windows: 6
+  recent_windows: 3
+  time_decay: 0.18
+  seasonal_neighbor: 0.75
+  seasonal_other: 0.45
+  weight_max: 2.5
+  history_cap: 12
