@@ -2,7 +2,7 @@
 """小网格阈值搜索模块。"""
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 
@@ -64,6 +64,7 @@ def select_alpha_beta(
     c_bnd = float(costs.get("c_bnd", 0.5)) if costs else 0.5
 
     feasible_found = False
+    candidates: List[Tuple[float, float, float]] = []
 
     for alpha in alpha_grid:
         for beta in beta_grid:
@@ -83,6 +84,7 @@ def select_alpha_beta(
                 if score > best_val:
                     best_val = score
                     best_alpha, best_beta = float(alpha), float(beta)
+            candidates.append((float(alpha), float(beta), float(score)))
 
     if not feasible_found:
         # 若无可行解，则退回到约束最接近的组合
@@ -94,4 +96,40 @@ def select_alpha_beta(
         else:
             best_val = expected_fbeta(P, best_alpha, best_beta, beta_weight=beta_weight)
 
-    return best_alpha, best_beta, float(best_val)
+    if objective == "expected_cost":
+        sort_reverse = False
+    else:
+        sort_reverse = True
+
+    if candidates:
+        ordered = sorted(candidates, key=lambda item: item[2], reverse=sort_reverse)
+        best_tuple = ordered[0]
+        second_tuple = ordered[1] if len(ordered) > 1 else ordered[0]
+        best_score = float(best_tuple[2])
+        second_score = float(second_tuple[2])
+        if objective == "expected_cost":
+            delta = float(abs(second_score - best_score))
+        else:
+            delta = float(abs(best_score - second_score))
+        best_point = (float(best_tuple[0]), float(best_tuple[1]))
+        second_point = (float(second_tuple[0]), float(second_tuple[1]))
+        feasible_count = len(candidates)
+    else:
+        best_score = float(best_val)
+        second_score = float("nan")
+        delta = float("nan")
+        best_point = (best_alpha, best_beta)
+        second_point = (float("nan"), float("nan"))
+        feasible_count = 0
+
+    info = {
+        "best_score": best_score,
+        "second_score": second_score,
+        "delta": delta,
+        "feasible_count": feasible_count,
+        "best_point": best_point,
+        "second_point": second_point,
+        "objective": objective,
+    }
+
+    return best_alpha, best_beta, info
