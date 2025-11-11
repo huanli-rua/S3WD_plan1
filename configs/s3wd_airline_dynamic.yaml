@@ -8,7 +8,7 @@ DATA:
   test_size: 0.50  # 测试集占总数据集的比例，设置为50%
   val_size: 0.30   # 验证集占总数据集的比例，设置为30%
   random_state: 42
-  start_year: 2018
+  start_year: 1987
 
 LEVEL:
   level_pcts: [0.6, 0.8, 1.0]
