@@ -1,7 +1,12 @@
 """
 s3wdlib: Minimal scaffolding for S3WD experiments.
 """
-from .data_io import load_table_auto, minmax_scale_fit_transform, augment_airline_features
+from .data_io import (
+    load_table_auto,
+    minmax_scale_fit_transform,
+    augment_airline_features,
+    assign_year_from_month_sequence,
+)
 from .features import rank_features_mi, make_levels
 from .dyn_threshold import adapt_thresholds_rule_based, adapt_thresholds_windowed_pso
 from .drift import DriftDetector, DriftEvent
@@ -27,6 +32,7 @@ __all__ = [
     "load_table_auto",
     "minmax_scale_fit_transform",
     "augment_airline_features",
+    "assign_year_from_month_sequence",
     "rank_features_mi",
     "make_levels",
     "adapt_thresholds_rule_based",

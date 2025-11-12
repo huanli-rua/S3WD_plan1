@@ -8,7 +8,7 @@ from __future__ import annotations
 - 提供 MinMax 归一化（论文推荐步骤）
 """
 import os
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
@@ -30,6 +30,11 @@ def _time_to_minutes(val) -> int:
     hour = max(0, min(23, hour))
     minute = max(0, min(59, minute))
     return hour * 60 + minute
+
+# ---------------------------------------------------------------------------
+# 数据加载与预处理
+# ---------------------------------------------------------------------------
+
 
 def load_table_auto(path: str,
                     label_col: Optional[str|int]=None,
@@ -133,6 +138,79 @@ def load_table_auto(path: str,
 
     print(f"【数据加载完毕】样本数={len(X)}，特征数={X.shape[1]}，正类比例={float(y.mean()):.4f}")
     return X, y
+
+
+def assign_year_from_month_sequence(
+    df: pd.DataFrame,
+    *,
+    start_year: Optional[int] = None,
+    month_candidates: Iterable[str] = ("Month", "month", "MONTH"),
+    year_candidates: Iterable[str] = ("Year", "year", "YEAR"),
+    copy: bool = True,
+) -> pd.DataFrame:
+    """Ensure the dataframe contains an integer ``Year`` column.
+
+    When the original data lacks a ``Year`` column, the function generates
+    consecutive years using ``start_year`` and a monotonically increasing
+    month sequence (rolling over when the month value decreases).
+
+    Parameters
+    ----------
+    df:
+        Source dataframe containing at least a month column.
+    start_year:
+        Base year used when the dataframe does not already contain year
+        information.  Must be provided in that case.
+    month_candidates / year_candidates:
+        Candidate column names to locate month/year fields.
+    copy:
+        Whether to operate on a copy of the dataframe.
+    """
+
+    month_col = next((c for c in month_candidates if c in df.columns), None)
+    if month_col is None:
+        raise ValueError("数据集缺少 Month 列，无法基于月份构造年份信息。")
+
+    result = df.copy() if copy else df
+    months = pd.to_numeric(result[month_col], errors="coerce")
+    if months.isna().all():
+        raise ValueError("Month 列无法转换为数值，无法构造年份信息。")
+    months = (
+        months.fillna(method="ffill")
+        .fillna(method="bfill")
+        .fillna(1)
+        .astype(int)
+        .clip(1, 12)
+    )
+    result[month_col] = months
+    if month_col != "Month":
+        result["Month"] = months
+
+    year_col = next((c for c in year_candidates if c in result.columns), None)
+    if year_col is not None:
+        years = pd.to_numeric(result[year_col], errors="coerce")
+        if years.isna().any():
+            raise ValueError("Year 列包含无法转换为整数的值。")
+        result["Year"] = years.astype(int)
+    else:
+        if start_year is None:
+            raise ValueError("数据集缺少 Year 列，且未提供 start_year 用于生成年份。")
+        month_values = months.to_numpy(dtype=int, copy=False)
+        if month_values.size == 0:
+            raise ValueError("数据集为空，无法生成年份序列。")
+        base_year = int(start_year)
+        year_offset = 0
+        prev_month = month_values[0]
+        year_values: list[int] = []
+        for idx, month_val in enumerate(month_values):
+            if idx > 0 and month_val < prev_month:
+                year_offset += 1
+            prev_month = month_val
+            year_values.append(base_year + year_offset)
+        result["Year"] = year_values
+        result["Year_synth"] = year_values
+
+    return result
 
 def minmax_scale_fit_transform(X_tr: pd.DataFrame, X_te: pd.DataFrame):
     """对训练集拟合 MinMaxScaler，并同步变换测试集。"""

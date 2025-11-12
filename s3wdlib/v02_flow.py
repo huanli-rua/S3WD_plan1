@@ -14,7 +14,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from .config_loader import load_yaml_cfg, show_cfg
-from .data_io import augment_airline_features, load_table_auto
+from .data_io import assign_year_from_month_sequence, augment_airline_features, load_table_auto
 from .bucketizer import assign_buckets, configure as bucket_configure
 from .similarity import configure as similarity_configure, current_config as similarity_current_config, corr_to_set
 from .ref_tuple import build_ref_tuples
@@ -318,36 +318,18 @@ def _compute_similarity_block(
 def _ensure_year_month(X: pd.DataFrame, start_year: Optional[int] = None) -> pd.DataFrame:
     if "Month" not in X.columns:
         raise ValueError("数据集缺少 Month 列，无法按 year-month 窗口前滚。")
-    X = X.copy()
-    X["Month"] = X["Month"].astype(int)
-    if "Year" not in X.columns:
-        if start_year is None:
-            raise ValueError("数据集缺少 Year 列，且未提供 start_year 生成合成年份。")
-        months = X["Month"].to_numpy(dtype=int)
-        if months.size == 0:
-            raise ValueError("数据集为空，无法构造合成年份。")
-        base_year = int(start_year)
-        year_values: List[int] = []
-        year_offset = 0
-        prev_month = int(months[0])
-        for idx, month in enumerate(months):
-            month_int = int(month)
-            if idx > 0 and month_int < prev_month:
-                year_offset += 1
-            prev_month = month_int
-            year_values.append(base_year + year_offset)
-        X["Year"] = year_values
-        X["Year_synth"] = year_values
-    else:
-        X["Year"] = X["Year"].astype(int)
-        if "Year_synth" in X.columns:
-            X["Year_synth"] = X["Year_synth"].astype(int)
-    min_year = int(X["Year"].min())
+
+    prepared = assign_year_from_month_sequence(X, start_year=start_year, copy=True)
+    prepared["Month"] = prepared["Month"].astype(int)
+    prepared["Year"] = prepared["Year"].astype(int)
+    if "Year_synth" in prepared.columns:
+        prepared["Year_synth"] = prepared["Year_synth"].astype(int)
+    min_year = int(prepared["Year"].min())
     _set_period_label_base(min_year)
-    X["period"] = pd.PeriodIndex(year=X["Year"], month=X["Month"], freq="M")
-    X.sort_values(["period"], inplace=True)
-    X.reset_index(drop=True, inplace=True)
-    return X
+    prepared["period"] = pd.PeriodIndex(year=prepared["Year"], month=prepared["Month"], freq="M")
+    prepared.sort_values(["period"], inplace=True)
+    prepared.reset_index(drop=True, inplace=True)
+    return prepared
 
 
 def _prepare_windows(X: pd.DataFrame, warmup_windows: int) -> WindowPlan:
@@ -473,7 +455,7 @@ def run_streaming_flow(
 
     start_year_cfg = cfg["DATA"].get("start_year")
     if start_year_cfg is None:
-        start_year_cfg = 1987
+        raise KeyError("配置缺少 DATA.start_year，用于按年份拆分窗口。")
     start_year_cfg = int(start_year_cfg)
 
     time_cfg = cfg.get("TIME", {}) or {}
@@ -501,6 +483,12 @@ def run_streaming_flow(
     )
     X_enriched = augment_airline_features(X_raw)
     X_enriched = _ensure_year_month(X_enriched, start_year=start_year_cfg)
+    year_counts = (
+        X_enriched.groupby("Year", sort=True)
+        .size()
+        .astype(int)
+        .to_dict()
+    )
     categorical_candidates = [
         c for c in ["UniqueCarrier", "Origin", "Dest", "DayOfWeek", "Month"] if c in X_enriched.columns
     ]
@@ -536,6 +524,7 @@ def run_streaming_flow(
         stream_labels_fmt,
         len(warmup_periods) + len(stream_periods),
     )
+    _logger.info("【年度样本量】%s", year_counts)
     _logger.info("【窗口计划】年度顺序=%s", all_years_fmt)
     _logger.info("【窗口计划】warmup(年)=%s，stream(年)=%s", warmup_years_fmt, stream_years_fmt)
 
