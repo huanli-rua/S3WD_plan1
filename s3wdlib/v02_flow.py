@@ -359,6 +359,25 @@ def _prepare_windows(X: pd.DataFrame, warmup_windows: int) -> WindowPlan:
     requested = max(0, int(warmup_windows))
     if requested == 0:
         requested = 12
+
+    if len(years) == 1:
+        total_periods = len(periods)
+        if total_periods <= 1:
+            warmup_count = 0
+        else:
+            warmup_count = min(requested, total_periods - 1)
+        warmup_periods = periods[:warmup_count]
+        stream_periods = periods[warmup_count:]
+        warmup_years: List[int] = []
+        stream_years = years if stream_periods else []
+        return WindowPlan(
+            warmup_periods=warmup_periods,
+            stream_periods=stream_periods,
+            warmup_years=warmup_years,
+            stream_years=stream_years,
+            all_years=years,
+        )
+
     warmup_year_count = max(1, math.ceil(requested / 12))
 
     if warmup_year_count >= len(years):
