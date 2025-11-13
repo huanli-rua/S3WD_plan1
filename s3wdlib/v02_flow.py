@@ -107,6 +107,20 @@ class SeasonalSamples:
 
 
 @dataclass
+class MeasureContext:
+    """封装阈值搜索与平滑过程需要的配置。"""
+
+    objective: str
+    grid: Dict[str, List[float]]
+    constraints: Dict[str, float]
+    costs: Dict[str, float]
+    beta_weight: float
+    alpha_range: Tuple[float, float, float]
+    beta_range: Tuple[float, float, float]
+    ema_alpha: float
+
+
+@dataclass
 class SeasonalReservoir:
     """维护季节桶（Month Bucket），支持延迟解锁与权重计算。"""
 
@@ -275,6 +289,158 @@ def _calc_distribution_metrics(base_probs: np.ndarray, curr_probs: np.ndarray, b
     return psi, tv
 
 
+def _recompute(
+    X_block: pd.DataFrame,
+    buckets_block: np.ndarray,
+    runtime_state: MutableMapping[str, object],
+    measure_ctx: MeasureContext,
+    baseline_info: Dict[str, object],
+    alpha_prev: Optional[float],
+    beta_prev: Optional[float],
+) -> Dict[str, object]:
+    """针对当前窗口重算阈值并返回详细统计。"""
+
+    sigma_value = float(runtime_state.get("sigma", 0.5))
+    similarity_configure({"sigma": sigma_value})
+
+    E_pos, E_neg = _compute_similarity_block(
+        X_block,
+        buckets_block,
+        runtime_state["ref_tuples"],
+        sigma=sigma_value,
+        sim_params=runtime_state,
+    )
+    P_block = to_trisect_probs(E_pos, E_neg)
+
+    measure_grid = {
+        "alpha": list(measure_ctx.grid.get("alpha", measure_ctx.alpha_range)),
+        "beta": list(measure_ctx.grid.get("beta", measure_ctx.beta_range)),
+    }
+
+    alpha_star, beta_star, grid_info = select_alpha_beta(
+        P_block,
+        measure_grid,
+        measure_ctx.constraints,
+        objective=measure_ctx.objective,
+        costs=measure_ctx.costs,
+        beta_weight=measure_ctx.beta_weight,
+    )
+
+    step_caps = runtime_state.get("step_cap", {"alpha": 0.08, "beta": 0.08})
+    alpha_cap = float(step_caps.get("alpha", 0.08))
+    beta_cap = float(step_caps.get("beta", 0.08))
+
+    def _evaluate(alpha_val: float, beta_val: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
+        pos_mask, neg_mask, bnd_mask = compute_region_masks(P_block, alpha_val, beta_val)
+        pos_cov_val = float(pos_mask.mean())
+        bnd_ratio_val = float(bnd_mask.mean())
+        return pos_mask, neg_mask, bnd_mask, pos_cov_val, bnd_ratio_val
+
+    if alpha_prev is None or beta_prev is None:
+        alpha_smooth, beta_smooth = alpha_star, beta_star
+    else:
+        alpha_smooth, beta_smooth = ema_clip(
+            alpha_star,
+            beta_star,
+            alpha_prev,
+            beta_prev,
+            measure_ctx.ema_alpha,
+            alpha_cap,
+            beta_cap,
+        )
+
+    positive, negative, boundary, pos_cov, bnd_ratio = _evaluate(alpha_smooth, beta_smooth)
+
+    constraint_cfg = measure_ctx.constraints
+    min_pos_cov = float(constraint_cfg.get("min_pos_coverage", 0.0))
+    bnd_cap = float(constraint_cfg.get("bnd_cap", 1.0))
+    constraint_causes: List[str] = []
+    if pos_cov < min_pos_cov:
+        constraint_causes.append("POS<min_pos_coverage")
+    if bnd_ratio > bnd_cap:
+        constraint_causes.append("BND>bnd_cap")
+    constraint_note = " & ".join(constraint_causes)
+    constraint_resolution = "满足约束"
+
+    if constraint_causes and alpha_prev is not None and beta_prev is not None:
+        limited_alpha = _limit_grid_range(measure_ctx.alpha_range, alpha_prev, alpha_cap)
+        limited_beta = _limit_grid_range(measure_ctx.beta_range, beta_prev, beta_cap)
+        limited_grid = {"alpha": list(limited_alpha), "beta": list(limited_beta)}
+        alt_alpha, alt_beta, _ = select_alpha_beta(
+            P_block,
+            limited_grid,
+            measure_ctx.constraints,
+            objective=measure_ctx.objective,
+            costs=measure_ctx.costs,
+            beta_weight=measure_ctx.beta_weight,
+        )
+        alt_pos, alt_neg, alt_bnd, alt_cov, alt_ratio = _evaluate(alt_alpha, alt_beta)
+        if alt_cov >= min_pos_cov and alt_ratio <= bnd_cap:
+            alpha_smooth, beta_smooth = alt_alpha, alt_beta
+            positive, negative, boundary = alt_pos, alt_neg, alt_bnd
+            pos_cov, bnd_ratio = alt_cov, alt_ratio
+            constraint_resolution = "步长网格重算"
+            if constraint_note:
+                constraint_note = f"{constraint_note} → {constraint_resolution}"
+            constraint_causes = []
+        else:
+            alpha_smooth, beta_smooth = alpha_prev, beta_prev
+            positive, negative, boundary, pos_cov, bnd_ratio = _evaluate(alpha_smooth, beta_smooth)
+            constraint_resolution = "回退上月阈值"
+            if constraint_note:
+                constraint_note = f"{constraint_note} → {constraint_resolution}"
+            constraint_causes = []
+    elif constraint_causes:
+        alpha_smooth, beta_smooth = alpha_star, beta_star
+        positive, negative, boundary, pos_cov, bnd_ratio = _evaluate(alpha_smooth, beta_smooth)
+        constraint_resolution = "首窗取网格解"
+        if constraint_note:
+            constraint_note = f"{constraint_note} → {constraint_resolution}"
+        constraint_causes = []
+
+    if measure_ctx.objective == "expected_cost":
+        score_smoothed = expected_cost(
+            P_block,
+            alpha_smooth,
+            beta_smooth,
+            measure_ctx.costs.get("c_fn", 1.0),
+            measure_ctx.costs.get("c_fp", 1.0),
+            measure_ctx.costs.get("c_bnd", 0.5),
+        )
+        perf_drop = max(0.0, score_smoothed - baseline_info["perf"])
+    else:
+        score_smoothed = expected_fbeta(
+            P_block,
+            alpha_smooth,
+            beta_smooth,
+            beta_weight=measure_ctx.beta_weight,
+        )
+        perf_drop = max(0.0, baseline_info["perf"] - score_smoothed)
+
+    stats = {
+        "P_block": P_block,
+        "E_pos": E_pos,
+        "E_neg": E_neg,
+        "alpha_star": alpha_star,
+        "beta_star": beta_star,
+        "alpha_smooth": alpha_smooth,
+        "beta_smooth": beta_smooth,
+        "positive": positive,
+        "negative": negative,
+        "boundary": boundary,
+        "pos_cov": pos_cov,
+        "bnd_ratio": bnd_ratio,
+        "score": score_smoothed,
+        "perf_drop": perf_drop,
+        "grid_info": grid_info,
+        "constraint_resolution": constraint_resolution,
+        "constraint_note": constraint_note,
+        "alpha_cap": alpha_cap,
+        "beta_cap": beta_cap,
+    }
+    return stats
+
+
 def _compute_similarity_block(
     X_block: pd.DataFrame,
     bucket_ids: np.ndarray,
@@ -408,6 +574,54 @@ def _build_figures(metrics_by_year: pd.DataFrame, output_dir: Path) -> None:
         plt.close(fig)
 
 
+def _weighted_average(values: pd.Series, weights: Optional[pd.Series]) -> float:
+    arr = values.to_numpy(dtype=float)
+    mask = ~np.isnan(arr)
+    if not mask.any():
+        return float("nan")
+    if weights is None:
+        return float(np.nanmean(arr[mask]))
+    weight_arr = weights.to_numpy(dtype=float)[mask]
+    total = np.sum(weight_arr)
+    if not np.isfinite(total) or total <= 0:
+        return float(np.nanmean(arr[mask]))
+    return float(np.dot(arr[mask], weight_arr) / total)
+
+
+def _summarize_yearly(metrics_df: pd.DataFrame, metric_columns: List[str]) -> pd.DataFrame:
+    if metrics_df.empty:
+        return pd.DataFrame(columns=["year", "n_samples", *metric_columns])
+
+    rows: List[Dict[str, float]] = []
+    for year, group in metrics_df.groupby("year", sort=True):
+        weights = group["n_samples"].astype(float)
+        weight_series = None if weights.isna().any() else weights
+        summary: Dict[str, float] = {"year": int(year)}
+        total_samples = float(np.nansum(weights.to_numpy()))
+        summary["n_samples"] = int(total_samples) if np.isfinite(total_samples) else 0
+        for column in metric_columns:
+            if column in group.columns:
+                summary[column] = _weighted_average(group[column], weight_series)
+            else:
+                summary[column] = float("nan")
+        rows.append(summary)
+
+        coverage = group["month"].nunique()
+        if coverage < 12:
+            log_msg = (
+                f"【年度汇总】year={int(year)}，F1={summary['F1']:.3f}，BAC={summary['BAC']:.3f}"
+                f"（权重=样本数={summary['n_samples']}，月份覆盖率={coverage}/12）"
+            )
+        else:
+            log_msg = (
+                f"【年度汇总】year={int(year)}，F1={summary['F1']:.3f}，BAC={summary['BAC']:.3f}"
+                f"（权重=样本数={summary['n_samples']}）"
+            )
+        _logger.info(log_msg)
+
+    return pd.DataFrame(rows)
+
+
 def _normalize_grid_range(entry: Optional[List[float] | Tuple[float, ...]], default: Tuple[float, float, float]) -> Tuple[float, float, float]:
     """标准化阈值网格范围配置。"""
 
@@ -435,14 +649,11 @@ def _limit_grid_range(base_range: Tuple[float, float, float], center: Optional[f
     return low, high, base_range[2]
 
 
-def run_streaming_flow(
-    cfg_path: str,
-    *,
-    warmup_windows: Optional[int] = None,
-) -> Dict[str, pd.DataFrame]:
-    """执行严格 year-month 的 v02 流程，返回生成的 DataFrame。"""
 
-    cfg = load_yaml_cfg(cfg_path)
+def run_streaming_flow(config_path: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """执行严格 year-month 的 v02 流程，返回各阶段的 DataFrame。"""
+
+    cfg = load_yaml_cfg(config_path)
     show_cfg(cfg)
 
     if not cfg.get("SWITCH", {}).get("enable_ref_tuple", True):
@@ -451,7 +662,7 @@ def run_streaming_flow(
         _logger.warning("SWITCH.enable_pso=true 时将回退旧主线，本流程不支持 PSO。")
 
     flow_cfg = cfg.get("FLOW", {}) or {}
-    warmup_span = int(flow_cfg.get("warmup_windows", warmup_windows or 6))
+    warmup_span = int(flow_cfg.get("warmup_windows", 6))
     recent_windows = int(flow_cfg.get("recent_windows", 3))
     time_decay = float(flow_cfg.get("time_decay", 0.15))
     seasonal_neighbor = float(flow_cfg.get("seasonal_neighbor", 0.7))
@@ -685,11 +896,20 @@ def run_streaming_flow(
     }
 
     ema_alpha_coeff = cfg["SMOOTH"].get("ema_alpha", 0.6)
+    measure_ctx = MeasureContext(
+        objective=objective,
+        grid=measure_grid,
+        constraints=dict(measure_constraints),
+        costs=dict(measure_costs),
+        beta_weight=float(beta_weight),
+        alpha_range=alpha_range_cfg,
+        beta_range=beta_range_cfg,
+        ema_alpha=float(ema_alpha_coeff),
+    )
 
     threshold_trace: List[Dict[str, float]] = []
     window_metrics: List[Dict[str, float]] = []
     drift_events: List[Dict[str, object]] = []
-    prediction_records: List[Dict[str, object]] = []
 
     for seq_idx, period in enumerate(stream_periods, start=1):
         unlockeds = reservoir.unlock_until(period)
@@ -753,148 +973,21 @@ def run_streaming_flow(
         y_block = y.loc[block_mask].reset_index(drop=True)
         buckets_block = assign_buckets(X_block)
 
-        def _recompute(sigma_value: float) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
-            runtime_state["sigma"] = sigma_value
-            similarity_configure({"sigma": sigma_value})
-            E_pos, E_neg = _compute_similarity_block(
-                X_block,
-                buckets_block,
-                ref_tuples,
-                sigma=sigma_value,
-                sim_params=runtime_state,
-            )
-            P_block = to_trisect_probs(E_pos, E_neg)
-            alpha_star, beta_star, grid_info = select_alpha_beta(
-                P_block,
-                measure_grid,
-                runtime_state["constraints"],
-                objective=objective,
-                costs=measure_costs,
-                beta_weight=beta_weight,
-            )
-
-            step_caps = runtime_state.get("step_cap", {"alpha": 0.08, "beta": 0.08})
-            alpha_cap = float(step_caps.get("alpha", 0.08))
-            beta_cap = float(step_caps.get("beta", 0.08))
-
-            def _evaluate(alpha_val: float, beta_val: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
-                pos_mask, neg_mask, bnd_mask = compute_region_masks(P_block, alpha_val, beta_val)
-                pos_cov_val = float(pos_mask.mean())
-                bnd_ratio_val = float(bnd_mask.mean())
-                return pos_mask, neg_mask, bnd_mask, pos_cov_val, bnd_ratio_val
-
-            if alpha_prev is None or beta_prev is None:
-                alpha_smooth, beta_smooth = alpha_star, beta_star
-            else:
-                alpha_smooth, beta_smooth = ema_clip(
-                    alpha_star,
-                    beta_star,
-                    alpha_prev,
-                    beta_prev,
-                    ema_alpha_coeff,
-                    alpha_cap,
-                    beta_cap,
-                )
-
-            positive, negative, boundary, pos_cov, bnd_ratio = _evaluate(alpha_smooth, beta_smooth)
-
-            constraint_cfg = runtime_state.get("constraints", {})
-            min_pos_cov = float(constraint_cfg.get("min_pos_coverage", 0.0))
-            bnd_cap = float(constraint_cfg.get("bnd_cap", 1.0))
-            constraint_causes: List[str] = []
-            if pos_cov < min_pos_cov:
-                constraint_causes.append("POS<min_pos_coverage")
-            if bnd_ratio > bnd_cap:
-                constraint_causes.append("BND>bnd_cap")
-            constraint_note = " & ".join(constraint_causes)
-            constraint_resolution = "满足约束"
-
-            if constraint_causes and alpha_prev is not None and beta_prev is not None:
-                limited_alpha = _limit_grid_range(alpha_range_cfg, alpha_prev, alpha_cap)
-                limited_beta = _limit_grid_range(beta_range_cfg, beta_prev, beta_cap)
-                limited_grid = {"alpha": list(limited_alpha), "beta": list(limited_beta)}
-                alt_alpha, alt_beta, _ = select_alpha_beta(
-                    P_block,
-                    limited_grid,
-                    runtime_state["constraints"],
-                    objective=objective,
-                    costs=measure_costs,
-                    beta_weight=beta_weight,
-                )
-                alt_pos, alt_neg, alt_bnd, alt_cov, alt_ratio = _evaluate(alt_alpha, alt_beta)
-                if alt_cov >= min_pos_cov and alt_ratio <= bnd_cap:
-                    alpha_smooth, beta_smooth = alt_alpha, alt_beta
-                    positive, negative, boundary = alt_pos, alt_neg, alt_bnd
-                    pos_cov, bnd_ratio = alt_cov, alt_ratio
-                    constraint_resolution = "步长网格重算"
-                    if constraint_note:
-                        constraint_note = f"{constraint_note} → {constraint_resolution}"
-                    constraint_causes = []
-                else:
-                    alpha_smooth, beta_smooth = alpha_prev, beta_prev
-                    positive, negative, boundary, pos_cov, bnd_ratio = _evaluate(alpha_smooth, beta_smooth)
-                    constraint_resolution = "回退上月阈值"
-                    if constraint_note:
-                        constraint_note = f"{constraint_note} → {constraint_resolution}"
-                    constraint_causes = []
-            elif constraint_causes:
-                # 首个窗口直接使用网格解即可满足约束
-                alpha_smooth, beta_smooth = alpha_star, beta_star
-                positive, negative, boundary, pos_cov, bnd_ratio = _evaluate(alpha_smooth, beta_smooth)
-                constraint_resolution = "首窗取网格解"
-                if constraint_note:
-                    constraint_note = f"{constraint_note} → {constraint_resolution}"
-                constraint_causes = []
-
-            if objective == "expected_cost":
-                score_smoothed = expected_cost(
-                    P_block,
-                    alpha_smooth,
-                    beta_smooth,
-                    measure_costs.get("c_fn", 1.0),
-                    measure_costs.get("c_fp", 1.0),
-                    measure_costs.get("c_bnd", 0.5),
-                )
-                perf_drop = max(0.0, score_smoothed - baseline_info["perf"])
-            else:
-                score_smoothed = expected_fbeta(
-                    P_block,
-                    alpha_smooth,
-                    beta_smooth,
-                    beta_weight=beta_weight,
-                )
-                perf_drop = max(0.0, baseline_info["perf"] - score_smoothed)
-            stats = {
-                "P_block": P_block,
-                "alpha_star": alpha_star,
-                "beta_star": beta_star,
-                "alpha_smooth": alpha_smooth,
-                "beta_smooth": beta_smooth,
-                "grid_info": grid_info,
-                "positive": positive,
-                "negative": negative,
-                "boundary": boundary,
-                "pos_cov": pos_cov,
-                "bnd_ratio": bnd_ratio,
-                "score": score_smoothed,
-                "perf_drop": perf_drop,
-                "constraint_resolution": constraint_resolution,
-                "constraint_note": constraint_note,
-                "E_pos": E_pos,
-                "E_neg": E_neg,
-                "alpha_cap": alpha_cap,
-                "beta_cap": beta_cap,
-            }
-            return positive, boundary, stats
-
-        _, _, stats = _recompute(float(runtime_state.get("sigma", 0.5)))
+        stats = _recompute(
+            X_block,
+            buckets_block,
+            runtime_state,
+            measure_ctx,
+            baseline_info,
+            alpha_prev,
+            beta_prev,
+        )
 
         psi_val, tv_val = _calc_distribution_metrics(
             baseline_info["p_pos"], stats["P_block"]["p_pos"], baseline_info["bins"]
         )
         posrate_curr = float(y_block.mean())
         posrate_gap = abs(posrate_curr - baseline_info["posrate"])
-
 
         stats_curr = {
             "window_id": int(f"{period.year}{period.month:02d}"),
@@ -934,7 +1027,15 @@ def run_streaming_flow(
             canonical_label = "、".join(canonical_actions) if canonical_actions else "观察"
 
         if runtime_state.get("redo_threshold"):
-            _, _, stats = _recompute(float(runtime_state.get("sigma", stats["alpha_smooth"])))
+            stats = _recompute(
+                X_block,
+                buckets_block,
+                runtime_state,
+                measure_ctx,
+                baseline_info,
+                alpha_prev,
+                beta_prev,
+            )
             runtime_state["redo_threshold"] = False
 
         grid_info = stats.get("grid_info", {})
@@ -1040,16 +1141,18 @@ def run_streaming_flow(
             objective,
         )
 
+        window_id = int(f"{period.year}{period.month:02d}")
         threshold_trace.append(
             {
+                "window_id": window_id,
                 "window": period_label,
                 "window_index": len(warmup_periods) + seq_idx,
                 "year": int(period.year),
                 "month": int(period.month),
-                "alpha_star": float(stats["alpha_star"]),
-                "beta_star": float(stats["beta_star"]),
-                "alpha_smoothed": float(stats["alpha_smooth"]),
-                "beta_smoothed": float(stats["beta_smooth"]),
+                "alpha_L1": float(stats["alpha_star"]),
+                "beta_L1": float(stats["beta_star"]),
+                "alpha_L2": float(stats["alpha_smooth"]),
+                "beta_L2": float(stats["beta_smooth"]),
                 "objective_score": float(stats["score"]),
                 "bnd_ratio": float(stats["bnd_ratio"]),
                 "pos_coverage": float(stats["pos_cov"]),
@@ -1059,6 +1162,7 @@ def run_streaming_flow(
                 "grid_second_score": float(grid_info.get("second_score", float("nan"))),
                 "grid_delta": float(grid_info.get("delta", float("nan"))),
                 "grid_feasible": int(grid_info.get("feasible_count", 0)),
+                "drift_level": drift_level,
             }
         )
 
@@ -1070,6 +1174,7 @@ def run_streaming_flow(
 
         window_metrics.append(
             {
+                "window_id": window_id,
                 "year": int(period.year),
                 "month": int(period.month),
                 "window": period_label,
@@ -1133,8 +1238,11 @@ def run_streaming_flow(
         if drift_level != "NONE":
             drift_events.append(
                 {
+                    "window_id": window_id,
                     "window": period_label,
-                    "level": drift_level,
+                    "year": int(period.year),
+                    "month": int(period.month),
+                    "drift_level": drift_level,
                     "psi": float(psi_val),
                     "tv": float(tv_val),
                     "posrate_gap": float(posrate_gap),
@@ -1143,29 +1251,12 @@ def run_streaming_flow(
                 }
             )
 
-        prediction_records.append(
-            {
-                "period": period,
-                "y_true": y_block.to_numpy(),
-                "y_prob": stats["P_block"]["p_pos"],
-                "y_pred": y_pred_label,
-            }
-        )
-
     trace_df = pd.DataFrame(threshold_trace)
     metrics_df = pd.DataFrame(window_metrics)
     if not metrics_df.empty:
         metrics_df.sort_values(["year", "month"], inplace=True)
     drift_df = pd.DataFrame(drift_events)
 
-    trace_path = data_dir / "threshold_trace_v02.csv"
-    metrics_path = data_dir / "window_metrics.csv"
-    drift_path = data_dir / "drift_events.csv"
-    trace_df.to_csv(trace_path, index=False)
-    metrics_df.to_csv(metrics_path, index=False)
-    drift_df.to_csv(drift_path, index=False)
-
-    yearly_rows: List[Dict[str, float]] = []
     metric_columns = [
         "Precision",
         "Recall",
@@ -1178,84 +1269,20 @@ def run_streaming_flow(
         "POS_coverage",
     ]
 
-    if metrics_df.empty:
-        metrics_by_year = pd.DataFrame(columns=["n_samples", *metric_columns])
-        metrics_by_year.to_csv(data_dir / "yearly_metrics.csv")
-        _build_figures(metrics_by_year, data_dir)
-        return {
-            "threshold_trace": trace_df,
-            "window_metrics": metrics_df,
-            "drift_events": drift_df,
-            "metrics_by_year": metrics_by_year,
-            "yearly_metrics": metrics_by_year,
-            "window_order": {
-                "warmup": warmup_years_fmt,
-                "stream": stream_years_fmt,
-                "warmup_periods": warmup_labels,
-                "stream_periods": stream_labels,
-                "all_years": all_years_fmt,
-            },
-        }
+    yearly_metrics = _summarize_yearly(metrics_df, metric_columns)
+    if not yearly_metrics.empty:
+        yearly_metrics.sort_values("year", inplace=True)
 
-    def _weighted_average(values: pd.Series, weights: Optional[pd.Series]) -> float:
-        arr = values.to_numpy(dtype=float)
-        mask = ~np.isnan(arr)
-        if not mask.any():
-            return float("nan")
-        if weights is None:
-            return float(np.nanmean(arr[mask]))
-        weight_arr = weights.to_numpy(dtype=float)[mask]
-        total = np.sum(weight_arr)
-        if not np.isfinite(total) or total <= 0:
-            return float(np.nanmean(arr[mask]))
-        return float(np.dot(arr[mask], weight_arr) / total)
+    drift_summary = drift_df["drift_level"].value_counts().to_dict() if not drift_df.empty else {}
+    _logger.info(
+        "【漂移事件】总数=%d，各级别统计=%s",
+        int(len(drift_df)),
+        {k: int(v) for k, v in sorted(drift_summary.items())},
+    )
 
-    for year, group in metrics_df.groupby("year", sort=True):
-        weights = group["n_samples"].astype(float)
-        weight_series = None if weights.isna().any() else weights
-        summary: Dict[str, float] = {"year": int(year)}
-        total_samples = float(np.nansum(weights.to_numpy()))
-        summary["n_samples"] = int(total_samples) if np.isfinite(total_samples) else 0
-        for column in metric_columns:
-            if column in group.columns:
-                summary[column] = _weighted_average(group[column], weight_series)
-            else:
-                summary[column] = float("nan")
-        yearly_rows.append(summary)
+    return trace_df, metrics_df, drift_df, yearly_metrics
 
-        coverage = group["month"].nunique()
-        if coverage < 12:
-            log_msg = (
-                f"【年度汇总】year={int(year)}，F1={summary['F1']:.3f}，BAC={summary['BAC']:.3f}"
-                f"（权重=样本数={summary['n_samples']}，月份覆盖率={coverage}/12）"
-            )
-        else:
-            log_msg = (
-                f"【年度汇总】year={int(year)}，F1={summary['F1']:.3f}，BAC={summary['BAC']:.3f}"
-                f"（权重=样本数={summary['n_samples']}）"
-            )
-        _logger.info(log_msg)
 
-    metrics_by_year = pd.DataFrame(yearly_rows).set_index("year").sort_index()
-    yearly_path = data_dir / "yearly_metrics.csv"
-    metrics_by_year.to_csv(yearly_path)
-
-    _build_figures(metrics_by_year, data_dir)
-
-    return {
-        "threshold_trace": trace_df,
-        "window_metrics": metrics_df,
-        "drift_events": drift_df,
-        "metrics_by_year": metrics_by_year,
-        "yearly_metrics": metrics_by_year,
-        "window_order": {
-            "warmup": warmup_years_fmt,
-            "stream": stream_years_fmt,
-            "warmup_periods": warmup_labels,
-            "stream_periods": stream_labels,
-            "all_years": all_years_fmt,
-        },
-    }
 
 
 __all__ = ["run_streaming_flow"]
