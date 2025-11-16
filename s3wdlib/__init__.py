@@ -7,6 +7,14 @@ from .data_io import (
     augment_airline_features,
     assign_year_from_month_sequence,
 )
+from .baselines import (
+    BaselineFeatureSet,
+    enrich_airline_dataframe,
+    split_by_year,
+    prepare_baseline_features,
+    evaluate_gwb_baseline_by_year,
+    evaluate_xgb_baseline_by_year,
+)
 from .features import rank_features_mi, make_levels
 from .dyn_threshold import adapt_thresholds_rule_based, adapt_thresholds_windowed_pso
 from .drift import DriftDetector, DriftEvent
@@ -33,6 +41,12 @@ __all__ = [
     "minmax_scale_fit_transform",
     "augment_airline_features",
     "assign_year_from_month_sequence",
+    "BaselineFeatureSet",
+    "enrich_airline_dataframe",
+    "split_by_year",
+    "prepare_baseline_features",
+    "evaluate_gwb_baseline_by_year",
+    "evaluate_xgb_baseline_by_year",
     "rank_features_mi",
     "make_levels",
     "adapt_thresholds_rule_based",
