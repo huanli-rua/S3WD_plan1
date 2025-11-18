@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 import os, yaml
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from .streaming import DynamicLoopConfig, DriftDetectorConfig, PosteriorUpdaterConfig
 
@@ -24,6 +24,47 @@ OPTIONAL_GROUPS = {
     "VAL",
 }
 GROUPS = REQUIRED_GROUPS | OPTIONAL_GROUPS
+
+
+def load_yaml_cfg(path: str) -> dict:
+    """Load a YAML configuration file and return a nested dictionary."""
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"配置文件不存在: {path}")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"解析 YAML 配置失败: {path}") from exc
+    if cfg is None:
+        return {}
+    if not isinstance(cfg, dict):
+        raise ValueError("YAML 配置的顶层结构必须是字典。")
+    return cfg
+
+
+def extract_vars(cfg: dict) -> dict:
+    """Extract frequently used variables from the nested config dictionary."""
+
+    if not isinstance(cfg, dict):
+        raise TypeError("cfg 必须是字典。")
+
+    def _require(section: str, key: str):
+        sec = cfg.get(section)
+        if not isinstance(sec, dict):
+            raise KeyError(f"配置缺少 {section} 分组。")
+        if key not in sec:
+            raise KeyError(f"配置缺少 {section}.{key} 字段。")
+        return sec[key]
+
+    vars_dict: Dict[str, Any] = {
+        "data_path": _require("PATH", "data_path"),
+        "result_dir": _require("PATH", "result_dir"),
+        "log_dir": _require("PATH", "log_dir"),
+        "label_col": _require("DATA", "label_col"),
+        "positive_label": _require("DATA", "positive_label"),
+    }
+    return vars_dict
 
 
 V02_DEFAULTS = {

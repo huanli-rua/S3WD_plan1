@@ -15,6 +15,8 @@ from sklearn.preprocessing import MinMaxScaler
 from scipy.io import arff
 import csv
 
+from .encoders import SimpleLabelEncoder
+
 
 def _time_to_minutes(val) -> int:
     """将 HHMM 时间编码转换为分钟，输入可能为字符串或数值。"""
@@ -211,6 +213,97 @@ def assign_year_from_month_sequence(
         result["Year_synth"] = year_values
 
     return result
+
+
+def add_time_columns(df: pd.DataFrame,
+                     dep_time_col: str,
+                     season_col: str,
+                     dep_slot_col: str,
+                     dep_slot_def: dict,
+                     start_year: int,
+                     sort_by_time: bool = True) -> pd.DataFrame:
+    """Add year/month/season and departure slot columns to the dataframe."""
+
+    if df is None:
+        raise ValueError("df 不能为空。")
+    if dep_time_col not in df.columns:
+        raise KeyError(f"数据缺少指定的出发时间列: {dep_time_col}")
+    if dep_slot_def is None or not isinstance(dep_slot_def, dict):
+        raise ValueError("dep_slot_def 必须是包含 ranges 的字典。")
+    mode = dep_slot_def.get("mode", "by_hour_ranges")
+    if mode != "by_hour_ranges":
+        raise ValueError(f"暂不支持的 dep_slot_def.mode: {mode}")
+    ranges = dep_slot_def.get("ranges")
+    if not isinstance(ranges, (list, tuple)) or len(ranges) == 0:
+        raise ValueError("dep_slot_def['ranges'] 必须是非空列表。")
+
+    enriched = df.copy()
+    enriched = assign_year_from_month_sequence(
+        enriched,
+        start_year=start_year,
+        copy=False,
+    )
+
+    dep_minutes = enriched[dep_time_col].apply(_time_to_minutes)
+    dep_hours = (dep_minutes // 60).astype(int)
+
+    dep_slots = np.full(len(enriched), -1, dtype=int)
+    for idx, hour_range in enumerate(ranges):
+        if not isinstance(hour_range, (list, tuple)) or len(hour_range) != 2:
+            raise ValueError("每个时段范围必须是长度为 2 的 [start, end) 序列。")
+        start, end = hour_range
+        start = int(start)
+        end = int(end)
+        mask = (dep_hours >= start) & (dep_hours < end)
+        dep_slots[mask.to_numpy(dtype=bool, copy=False)] = idx
+
+    enriched[dep_slot_col] = dep_slots.astype(int)
+    enriched["year"] = enriched["Year"].astype(int)
+    enriched["month"] = enriched["Month"].astype(int)
+    enriched[season_col] = (
+        enriched["year"].astype(str)
+        + "-"
+        + enriched["month"].map(lambda m: f"{int(m):02d}")
+    )
+
+    if sort_by_time:
+        enriched["_dep_minutes_tmp"] = dep_minutes
+        enriched = (
+            enriched.sort_values(by=["year", "month", "_dep_minutes_tmp"]).reset_index(drop=True)
+        )
+        enriched = enriched.drop(columns=["_dep_minutes_tmp"])
+
+    return enriched
+
+
+def fit_simple_label_encoders(df: pd.DataFrame, categorical_cols: list[str]) -> dict[str, SimpleLabelEncoder]:
+    """Fit label encoders on the specified categorical columns."""
+
+    encoders: dict[str, SimpleLabelEncoder] = {}
+    for col in categorical_cols:
+        if col not in df.columns:
+            raise KeyError(f"数据缺少类别列: {col}")
+        encoder = SimpleLabelEncoder()
+        encoder.fit(df[col])
+        encoders[col] = encoder
+    return encoders
+
+
+def apply_simple_label_encoders(
+    df: pd.DataFrame,
+    encoders: dict[str, SimpleLabelEncoder],
+    *,
+    suffix: str = "_enc",
+    inplace: bool = False,
+) -> pd.DataFrame:
+    """Apply fitted encoders to dataframe columns and append encoded versions."""
+
+    target = df if inplace else df.copy()
+    for col, encoder in encoders.items():
+        if col not in target.columns:
+            raise KeyError(f"数据缺少类别列: {col}")
+        target[f"{col}{suffix}"] = encoder.transform(target[col])
+    return target
 
 def minmax_scale_fit_transform(X_tr: pd.DataFrame, X_te: pd.DataFrame):
     """对训练集拟合 MinMaxScaler，并同步变换测试集。"""
